@@ -43,6 +43,8 @@ class OrderServiceTest {
 
     private OrderService orderService;
 
+    private static final Long CUSTOMER_ID = 42L;
+
     @BeforeEach
     void setUp() {
         orderService = new OrderService(orderRepository, orderPlacement);
@@ -59,12 +61,12 @@ class OrderServiceTest {
         @Test
         void findAll_whenOrdersExist_returnsThemAsResponses() {
             // GIVEN
-            Order order = TestFixtures.withId(new Order(NOW), 1L);
+            Order order = TestFixtures.withId(new Order(TestFixtures.customer(CUSTOMER_ID), NOW), 1L);
             order.addItem(new OrderItem(order, keyboard, 2));
-            given(orderRepository.findAllWithItems()).willReturn(List.of(order));
+            given(orderRepository.findAllByCustomerWithItems(CUSTOMER_ID)).willReturn(List.of(order));
 
             // WHEN / THEN
-            assertThat(orderService.findAll()).singleElement().satisfies(response -> {
+            assertThat(orderService.findAll(CUSTOMER_ID)).singleElement().satisfies(response -> {
                 assertThat(response.id()).isEqualTo(1L);
                 assertThat(response.totalAmount()).isEqualByComparingTo("259.98");
             });
@@ -73,10 +75,10 @@ class OrderServiceTest {
         @Test
         void findAll_whenThereAreNoOrders_returnsEmptyList() {
             // GIVEN
-            given(orderRepository.findAllWithItems()).willReturn(List.of());
+            given(orderRepository.findAllByCustomerWithItems(CUSTOMER_ID)).willReturn(List.of());
 
             // WHEN / THEN
-            assertThat(orderService.findAll()).isEmpty();
+            assertThat(orderService.findAll(CUSTOMER_ID)).isEmpty();
         }
     }
 
@@ -86,12 +88,12 @@ class OrderServiceTest {
         @Test
         void findById_whenTheOrderExists_returnsIt() {
             // GIVEN
-            Order order = TestFixtures.withId(new Order(NOW), 5L);
+            Order order = TestFixtures.withId(new Order(TestFixtures.customer(CUSTOMER_ID), NOW), 5L);
             order.addItem(new OrderItem(order, keyboard, 1));
-            given(orderRepository.findByIdWithItems(5L)).willReturn(Optional.of(order));
+            given(orderRepository.findByIdAndCustomerWithItems(5L, CUSTOMER_ID)).willReturn(Optional.of(order));
 
             // WHEN / THEN
-            OrderResponse found = orderService.findById(5L);
+            OrderResponse found = orderService.findById(5L, CUSTOMER_ID);
             assertThat(found.id()).isEqualTo(5L);
             assertThat(found.placedAt()).isEqualTo(NOW);
             assertThat(found.items()).hasSize(1);
@@ -100,10 +102,10 @@ class OrderServiceTest {
         @Test
         void findById_whenTheOrderIsMissing_throwsNotFound() {
             // GIVEN
-            given(orderRepository.findByIdWithItems(42L)).willReturn(Optional.empty());
+            given(orderRepository.findByIdAndCustomerWithItems(42L, CUSTOMER_ID)).willReturn(Optional.empty());
 
             // WHEN / THEN
-            assertThatThrownBy(() -> orderService.findById(42L))
+            assertThatThrownBy(() -> orderService.findById(42L, CUSTOMER_ID))
                     .isInstanceOf(NotFoundException.class)
                     .hasMessage("Order 42 not found");
         }

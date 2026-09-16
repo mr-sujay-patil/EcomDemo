@@ -9,9 +9,13 @@ import com.ecomdemo.cart.dto.CartItemResponse;
 import com.ecomdemo.common.ConflictException;
 import com.ecomdemo.product.ProductService;
 import com.ecomdemo.product.dto.ProductRequest;
+import com.ecomdemo.customer.CustomerService;
+import com.ecomdemo.customer.dto.RegisterRequest;
 import com.ecomdemo.product.dto.ProductResponse;
+import com.ecomdemo.support.TestSecurity;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -54,6 +58,28 @@ class OrderAuditRollbackTest {
     private OrderService orderService;
 
     @Autowired
+    private CustomerService customerService;
+
+    /** The signed-in shopper these tests act as, registered once per test. */
+    private Long customerId;
+
+    @BeforeEach
+    void registerAndAuthenticate() {
+        customerId = customerService.register(new RegisterRequest(
+                "audit-" + System.nanoTime() + "@ecomdemo.local", "password123", "Test Shopper")).id();
+        // The @PreAuthorize on OrderService compares against authentication.principal.id, so these
+        // direct service calls need a principal even though no HTTP request is involved.
+        TestSecurity.actAs(customerId, "irrelevant@ecomdemo.local");
+    }
+
+    @AfterEach
+    void clearAuthentication() {
+        // SecurityContextHolder is thread-local and JUnit reuses the thread for the next test.
+        TestSecurity.clear();
+    }
+
+
+    @Autowired
     private ProductService productService;
 
     @Autowired
@@ -65,19 +91,12 @@ class OrderAuditRollbackTest {
     @Autowired
     private OrderAuditRepository orderAuditRepository;
 
-    @BeforeEach
-    void emptyTheCart() {
-        for (CartItemResponse item : cartService.getCart().items()) {
-            cartService.removeItem(item.productId());
-        }
-    }
-
     @Test
     void placeOrder_whenStockRanOutAfterTheCartWasFilled_rollsBackButKeepsTheAudit() {
         // GIVEN a cart holding five units...
         ProductResponse product = productService.create(new ProductRequest(
                 "Disappearing Stock", "Sells out mid-checkout", new BigDecimal("30.00"), 5, null));
-        cartService.addItem(new AddCartItemRequest(product.id(), 5));
+        cartService.addItem(customerId, new AddCartItemRequest(product.id(), 5));
 
         // ...and stock that drops to one before checkout, as it would if somebody else bought four
         productService.update(product.id(), new ProductRequest(
@@ -87,7 +106,7 @@ class OrderAuditRollbackTest {
         long auditsBefore = orderAuditRepository.count();
 
         // WHEN checkout is attempted
-        assertThatThrownBy(() -> orderService.placeOrder())
+        assertThatThrownBy(() -> orderService.placeOrder(customerId))
                 .isInstanceOf(ConflictException.class)
                 .hasMessageContaining("Only 1 unit(s)");
 
@@ -102,7 +121,7 @@ class OrderAuditRollbackTest {
                 .isEqualTo(1);
 
         // ...and the cart is untouched, still holding what the customer put in it
-        assertThat(cartService.getCart().items())
+        assertThat(cartService.getCart(customerId).items())
                 .as("a failed order does not consume the cart")
                 .hasSize(1);
 
@@ -125,10 +144,10 @@ class OrderAuditRollbackTest {
         // GIVEN a cart that can be fulfilled
         ProductResponse product = productService.create(new ProductRequest(
                 "Plentiful Stock", "Always available", new BigDecimal("12.00"), 50, null));
-        cartService.addItem(new AddCartItemRequest(product.id(), 2));
+        cartService.addItem(customerId, new AddCartItemRequest(product.id(), 2));
 
         // WHEN
-        long orderId = orderService.placeOrder().id();
+        long orderId = orderService.placeOrder(customerId).id();
 
         // THEN the audit trail records the success as well as the failures - an audit that only
         // captured what went wrong would be describing half the system

@@ -1,8 +1,10 @@
 package com.ecomdemo.cart;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.Optional;
 
+import com.ecomdemo.customer.Customer;
 import com.ecomdemo.product.Product;
 
 import jakarta.persistence.EntityManager;
@@ -41,7 +43,7 @@ class CartRepositoryTest {
     @Autowired
     private EntityManager entityManager;
 
-    private Long cartId;
+    private Long ownerId;
 
     @BeforeEach
     void seedACartWithTwoLines() {
@@ -52,10 +54,16 @@ class CartRepositoryTest {
         Product mouse = entityManager.merge(
                 new Product("Test Mouse", "For the test", new BigDecimal("49.50"), 120));
 
-        Cart cart = new Cart(2L);
+        // A cart needs an owner now, and the owner has to exist before the foreign key is written.
+        Customer owner = entityManager.merge(new Customer(
+                "cart-repo-test@ecomdemo.local", "irrelevant-hash", "Repo Test",
+                Customer.Role.CUSTOMER, Instant.parse("2026-01-01T00:00:00Z")));
+
+        Cart cart = new Cart(owner);
         cart.addOrIncrease(keyboard, 2);
         cart.addOrIncrease(mouse, 1);
-        cartId = cartRepository.save(cart).getId();
+        cartRepository.save(cart);
+        ownerId = owner.getId();
 
         // Flush the inserts, then detach everything. Without the clear(), the entities would still
         // be in the persistence context and the next query would return them from memory - the
@@ -65,9 +73,9 @@ class CartRepositoryTest {
     }
 
     @Test
-    void findByIdWithItems_whenTheCartExists_returnsItemsAndProductsAlreadyInitialised() {
+    void findByCustomerIdWithItems_whenTheCartExists_returnsItemsAndProductsAlreadyInitialised() {
         // WHEN
-        Optional<Cart> found = cartRepository.findByIdWithItems(cartId);
+        Optional<Cart> found = cartRepository.findByCustomerIdWithItems(ownerId);
 
         // THEN
         assertThat(found).isPresent();
@@ -89,14 +97,17 @@ class CartRepositoryTest {
     }
 
     @Test
-    void findByIdWithItems_whenTheCartHasNoItems_stillReturnsTheCart() {
+    void findByCustomerIdWithItems_whenTheCartHasNoItems_stillReturnsTheCart() {
         // GIVEN - a left join, so an empty cart must not disappear from the result
-        cartRepository.save(new Cart(3L));
+        Customer other = entityManager.merge(new Customer(
+                "empty-cart@ecomdemo.local", "irrelevant-hash", "Empty Cart Owner",
+                Customer.Role.CUSTOMER, Instant.parse("2026-01-01T00:00:00Z")));
+        cartRepository.save(new Cart(other));
         entityManager.flush();
         entityManager.clear();
 
         // WHEN
-        Optional<Cart> found = cartRepository.findByIdWithItems(3L);
+        Optional<Cart> found = cartRepository.findByCustomerIdWithItems(other.getId());
 
         // THEN - an inner join would have returned empty here
         assertThat(found).isPresent();
@@ -104,8 +115,8 @@ class CartRepositoryTest {
     }
 
     @Test
-    void findByIdWithItems_whenTheCartDoesNotExist_returnsEmpty() {
+    void findByCustomerIdWithItems_whenTheCartDoesNotExist_returnsEmpty() {
         // WHEN / THEN
-        assertThat(cartRepository.findByIdWithItems(9999L)).isEmpty();
+        assertThat(cartRepository.findByCustomerIdWithItems(9999L)).isEmpty();
     }
 }

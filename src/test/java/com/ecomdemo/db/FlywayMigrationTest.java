@@ -48,7 +48,7 @@ class FlywayMigrationTest {
                     "select version from flyway_schema_history where version is not null order by installed_rank");
 
             // THEN every migration in db/migration is recorded, in the order it was applied
-            assertThat(versions).containsExactly("1", "2", "3", "4", "5");
+            assertThat(versions).containsExactly("1", "2", "3", "4", "5", "6", "7");
         }
 
         @Test
@@ -71,7 +71,7 @@ class FlywayMigrationTest {
 
             // THEN each one has the checksum Flyway compares on every later start. This is what makes
             // editing an applied migration a startup failure rather than a silent divergence.
-            assertThat(checksums).hasSize(5).doesNotContainNull();
+            assertThat(checksums).hasSize(7).doesNotContainNull();
         }
     }
 
@@ -88,7 +88,7 @@ class FlywayMigrationTest {
 
             // THEN all five are there
             assertThat(tables).containsExactlyInAnyOrder(
-                    "products", "carts", "cart_items", "orders", "order_items", "order_audit");
+                    "products", "carts", "cart_items", "orders", "order_items", "order_audit", "users");
         }
 
         @Test
@@ -168,13 +168,27 @@ class FlywayMigrationTest {
         }
 
         @Test
-        void v2_always_seedsTheSharedCartRow() {
-            // GIVEN the seed migration
-            // WHEN the cart table is read
-            List<Object> ids = nativeQuery("select id from carts");
+        void v6_always_seedsExactlyOneAdministrator() {
+            // GIVEN the seed in V6
+            // WHEN the users table is read
+            List<Object> admins = nativeQuery("select email from users where role = 'ADMIN'");
 
-            // THEN the single shared cart exists, so the first request never has to create it
-            assertThat(ids).isNotEmpty();
+            // THEN there is one, and it is the documented local account. V2's shared cart row is
+            // deliberately not asserted any more: V7 dropped the carts table and rebuilt it per
+            // customer, so that row no longer exists by the time the migrations finish.
+            assertThat(admins).containsExactly("admin@ecomdemo.local");
+        }
+
+        @Test
+        void v7_always_givesEveryCartAnOwner() {
+            // GIVEN the rebuilt carts table
+            // WHEN its columns are read
+            List<Object> nullable = nativeQuery(
+                    "select is_nullable from information_schema.columns "
+                            + "where lower(table_name) = 'carts' and lower(column_name) = 'customer_id'");
+
+            // THEN a cart cannot exist without one
+            assertThat(nullable).containsExactly("NO");
         }
     }
 }

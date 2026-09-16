@@ -7,10 +7,18 @@ import com.ecomdemo.common.NotFoundException;
 import com.ecomdemo.product.dto.ProductRequest;
 import com.ecomdemo.product.dto.ProductResponse;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import com.ecomdemo.common.ApiErrorResponder;
+import com.ecomdemo.support.SecurityMockMvcCustomizer;
+
+import org.springframework.security.test.context.support.WithMockUser;
+import com.ecomdemo.common.WebSecurityConfiguration;
+
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -34,8 +42,20 @@ import static org.mockito.Mockito.verify;
  * a wrong status code, a wrong JSON shape, or an exception that no longer maps where it should.
  *
  * <p>{@code @MockitoBean} is the Spring Boot 4 replacement for the removed {@code @MockBean}.
+ *
+ * <p>Reads carry no authentication at all, which is the assertion: browsing the catalogue is public.
+ * Writes carry {@code @WithMockUser(roles = "ADMIN")} - plain, because these tests care only about
+ * the role and nothing here needs a customer id. {@code SecurityRulesTest} covers what happens when
+ * the role is wrong or missing.
  */
 @WebMvcTest(ProductController.class)
+/*
+ * A @WebMvcTest slice loads controllers, not arbitrary @Configuration classes - so without this the
+ * real rules never load, Boot's default security applies instead, and @AuthenticationPrincipal is
+ * not even resolved (Spring MVC falls back to treating SecurityUser as a model attribute and tries
+ * to construct one). Importing them means these tests exercise the authorization rules that ship.
+ */
+@Import({WebSecurityConfiguration.class, ApiErrorResponder.class, SecurityMockMvcCustomizer.class})
 class ProductControllerTest {
 
     @Autowired
@@ -104,6 +124,7 @@ class ProductControllerTest {
     }
 
     @Test
+    @WithMockUser(roles = "ADMIN")
     void create_withAValidBody_returns201WithLocationHeader() {
         // GIVEN
         given(productService.create(any(ProductRequest.class))).willReturn(keyboard());
@@ -119,6 +140,7 @@ class ProductControllerTest {
     }
 
     @Test
+    @WithMockUser(roles = "ADMIN")
     void create_withABlankNameAndNegativePrice_returns400NamingBothFields() {
         // WHEN - @Valid rejects this before the controller body ever runs
         assertThat(mvc.post().uri("/api/products")
@@ -137,6 +159,7 @@ class ProductControllerTest {
     }
 
     @Test
+    @WithMockUser(roles = "ADMIN")
     void create_withMalformedJson_returns400() {
         // WHEN / THEN
         assertThat(mvc.post().uri("/api/products")
@@ -148,6 +171,7 @@ class ProductControllerTest {
     }
 
     @Test
+    @WithMockUser(roles = "ADMIN")
     void update_withAValidBody_returns200() {
         // GIVEN
         given(productService.update(eq(1L), any(ProductRequest.class))).willReturn(keyboard());
@@ -163,6 +187,7 @@ class ProductControllerTest {
     }
 
     @Test
+    @WithMockUser(roles = "ADMIN")
     void delete_whenTheProductExists_returns204WithNoBody() {
         // WHEN / THEN
         assertThat(mvc.delete().uri("/api/products/1"))
@@ -173,6 +198,7 @@ class ProductControllerTest {
     }
 
     @Test
+    @WithMockUser(roles = "ADMIN")
     void delete_whenTheProductIsMissing_returns404() {
         // GIVEN
         willThrow(new NotFoundException("Product 9999 not found")).given(productService).delete(9999L);

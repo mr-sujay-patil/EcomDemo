@@ -16,6 +16,18 @@ public record CartResponse(
         int totalItems,
         BigDecimal total) {
 
+    /**
+     * The view of a cart that does not exist yet.
+     *
+     * <p>A customer who has never added anything has no row in {@code carts}, and reading their cart
+     * must not create one - a GET that writes turns every visit into a database insert and leaves a
+     * row behind for everybody who ever looked. {@code cartId} is null because there genuinely is no
+     * cart; it appears the moment something is added.
+     */
+    public static CartResponse empty() {
+        return new CartResponse(null, List.of(), 0, BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP));
+    }
+
     public static CartResponse from(Cart cart) {
         List<CartItemResponse> items = cart.getItems().stream()
                 .map(CartItemResponse::from)

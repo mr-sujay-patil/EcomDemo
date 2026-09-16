@@ -51,7 +51,7 @@ class PlaceOrderIT extends AbstractPostgresIT {
     }
 
     private ProductResponse newProduct(String name, String price, int stock) {
-        return client.post().uri("/api/products")
+        return admin.post().uri("/api/products")
                 .body(new ProductRequest(name, "for the order IT", new BigDecimal(price), stock, null))
                 .exchange()
                 .expectStatus().isCreated()
@@ -60,7 +60,7 @@ class PlaceOrderIT extends AbstractPostgresIT {
     }
 
     private ProductResponse getProduct(Long id) {
-        return client.get().uri("/api/products/" + id).exchange()
+        return anonymous.get().uri("/api/products/" + id).exchange()
                 .expectStatus().isOk()
                 .expectBody(ProductResponse.class)
                 .returnResult().getResponseBody();
@@ -133,7 +133,7 @@ class PlaceOrderIT extends AbstractPostgresIT {
         assertThat(order).isNotNull();
 
         // WHEN the catalogue is repriced afterwards
-        client.put().uri("/api/products/" + product.id())
+        admin.put().uri("/api/products/" + product.id())
                 .body(new ProductRequest("Renamed Entirely", "now dearer", new BigDecimal("999.99"), 9, null))
                 .exchange().expectStatus().isOk();
 
@@ -156,7 +156,7 @@ class PlaceOrderIT extends AbstractPostgresIT {
         ProductResponse product = newProduct("IT Order Vanishing " + System.nanoTime(), "30.00", 5);
         client.post().uri("/api/cart/items").body(new AddCartItemRequest(product.id(), 5))
                 .exchange().expectStatus().isOk();
-        client.put().uri("/api/products/" + product.id())
+        admin.put().uri("/api/products/" + product.id())
                 .body(new ProductRequest(product.name(), "sold out", new BigDecimal("30.00"), 1, null))
                 .exchange().expectStatus().isOk();
 

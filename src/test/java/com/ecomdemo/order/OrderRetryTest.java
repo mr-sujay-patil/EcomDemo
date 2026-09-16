@@ -7,6 +7,10 @@ import java.util.List;
 import com.ecomdemo.common.ConflictException;
 import com.ecomdemo.order.dto.OrderResponse;
 
+import com.ecomdemo.support.TestSecurity;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -40,6 +44,22 @@ import static org.mockito.Mockito.verify;
 @ActiveProfiles("test")
 class OrderRetryTest {
 
+    private static final Long CUSTOMER_ID = 42L;
+
+    @BeforeEach
+    void authenticate() {
+        // placeOrder carries @PreAuthorize("#customerId == authentication.principal.id"), which needs
+        // an Authentication to evaluate. These tests call the service directly, so there is no filter
+        // chain to have put one there.
+        TestSecurity.actAs(CUSTOMER_ID, "retry-test@ecomdemo.local");
+    }
+
+    @AfterEach
+    void clearAuthentication() {
+        TestSecurity.clear();
+    }
+
+
     @Autowired
     private OrderService orderService;
 
@@ -54,58 +74,58 @@ class OrderRetryTest {
     @Test
     void placeOrder_whenPlacementSucceeds_attemptsOnce() {
         // GIVEN
-        given(orderPlacement.placeOnce()).willReturn(response(1L));
+        given(orderPlacement.placeOnce(CUSTOMER_ID)).willReturn(response(1L));
 
         // WHEN
-        OrderResponse order = orderService.placeOrder();
+        OrderResponse order = orderService.placeOrder(CUSTOMER_ID);
 
         // THEN there is nothing to retry, so nothing is retried
         assertThat(order.id()).isEqualTo(1L);
-        verify(orderPlacement, times(1)).placeOnce();
+        verify(orderPlacement, times(1)).placeOnce(CUSTOMER_ID);
     }
 
     @Test
     void placeOrder_whenTheFirstAttemptHitsAVersionConflict_retriesAndSucceeds() {
         // GIVEN the first attempt loses the race and the second wins it
-        given(orderPlacement.placeOnce())
+        given(orderPlacement.placeOnce(CUSTOMER_ID))
                 .willThrow(new OptimisticLockingFailureException("product changed"))
                 .willReturn(response(2L));
 
         // WHEN
-        OrderResponse order = orderService.placeOrder();
+        OrderResponse order = orderService.placeOrder(CUSTOMER_ID);
 
         // THEN the caller never learns there was a conflict at all
         assertThat(order.id()).isEqualTo(2L);
-        verify(orderPlacement, times(2)).placeOnce();
+        verify(orderPlacement, times(2)).placeOnce(CUSTOMER_ID);
     }
 
     @Test
     void placeOrder_whenEveryAttemptHitsAVersionConflict_givesUpAfterTheLimit() {
         // GIVEN contention that never clears
         willThrow(new OptimisticLockingFailureException("product changed"))
-                .given(orderPlacement).placeOnce();
+                .given(orderPlacement).placeOnce(CUSTOMER_ID);
 
         // WHEN / THEN the exception escapes and GlobalExceptionHandler turns it into a 409
-        assertThatThrownBy(() -> orderService.placeOrder())
+        assertThatThrownBy(() -> orderService.placeOrder(CUSTOMER_ID))
                 .isInstanceOf(OptimisticLockingFailureException.class);
 
         // AND it stopped. Retrying an endpoint forever under contention is how one slow request
         // becomes an outage - the honest answer to the caller is "someone else got there first".
-        verify(orderPlacement, times((int) OrderService.MAX_RETRIES + 1)).placeOnce();
+        verify(orderPlacement, times((int) OrderService.MAX_RETRIES + 1)).placeOnce(CUSTOMER_ID);
     }
 
     @Test
     void placeOrder_whenTheCartIsEmpty_doesNotRetry() {
         // GIVEN a failure no amount of retrying can fix
         willThrow(new ConflictException("Cannot place an order: the cart is empty"))
-                .given(orderPlacement).placeOnce();
+                .given(orderPlacement).placeOnce(CUSTOMER_ID);
 
         // WHEN / THEN
-        assertThatThrownBy(() -> orderService.placeOrder()).isInstanceOf(ConflictException.class);
+        assertThatThrownBy(() -> orderService.placeOrder(CUSTOMER_ID)).isInstanceOf(ConflictException.class);
 
         // AND it was attempted exactly once. @Retryable names the exceptions worth retrying; an
         // empty cart is not one, and retrying it would only make the caller wait longer for the
         // same 409.
-        verify(orderPlacement, times(1)).placeOnce();
+        verify(orderPlacement, times(1)).placeOnce(CUSTOMER_ID);
     }
 }

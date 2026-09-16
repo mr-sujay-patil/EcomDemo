@@ -20,6 +20,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * PostgreSQL rejects. H2 in {@code MODE=PostgreSQL} imitates a great deal of that, and the places it
  * does not are exactly the ones nobody thinks to check.
  *
+ * <p>Writes go through {@code admin} and reads through {@code anonymous}, which is the authorization
+ * rule stated as code: changing the catalogue needs ADMIN, browsing it needs nobody at all.
+ *
  * <p>Nothing here assumes an empty table. Every integration test in this run shares one container,
  * and each one commits - so assertions are about the rows this test created, never about counts.
  */
@@ -32,7 +35,7 @@ class ProductCrudIT extends AbstractPostgresIT {
     @Test
     void create_thenRead_returnsWhatWasStored() {
         // GIVEN / WHEN
-        ProductResponse created = client.post().uri("/api/products")
+        ProductResponse created = admin.post().uri("/api/products")
                 .body(request("IT Desk Lamp", "45.50", 12, "Lighting"))
                 .exchange()
                 .expectStatus().isCreated()
@@ -47,7 +50,7 @@ class ProductCrudIT extends AbstractPostgresIT {
         assertThat(created.price()).isEqualByComparingTo("45.50");
 
         // AND reading it back over HTTP gives the same thing from the database
-        ProductResponse fetched = client.get().uri("/api/products/" + created.id())
+        ProductResponse fetched = anonymous.get().uri("/api/products/" + created.id())
                 .exchange()
                 .expectStatus().isOk()
                 .expectBody(ProductResponse.class)
@@ -62,7 +65,7 @@ class ProductCrudIT extends AbstractPostgresIT {
     void create_withMoreThanTwoDecimalPlaces_storesTheRoundedValue() {
         // GIVEN a price PostgreSQL's numeric(12,2) cannot hold as given
         // WHEN
-        ProductResponse created = client.post().uri("/api/products")
+        ProductResponse created = admin.post().uri("/api/products")
                 .body(request("IT Rounding", "9.999", 1, null))
                 .exchange()
                 .expectStatus().isCreated()
@@ -79,7 +82,7 @@ class ProductCrudIT extends AbstractPostgresIT {
     @Test
     void update_replacesEveryFieldAndPersists() {
         // GIVEN
-        ProductResponse created = client.post().uri("/api/products")
+        ProductResponse created = admin.post().uri("/api/products")
                 .body(request("IT Before", "10.00", 5, "Old"))
                 .exchange()
                 .expectStatus().isCreated()
@@ -88,13 +91,13 @@ class ProductCrudIT extends AbstractPostgresIT {
         assertThat(created).isNotNull();
 
         // WHEN
-        client.put().uri("/api/products/" + created.id())
+        admin.put().uri("/api/products/" + created.id())
                 .body(request("IT After", "20.00", 50, "New"))
                 .exchange()
                 .expectStatus().isOk();
 
         // THEN the change was flushed by dirty checking, with no save() call anywhere
-        ProductResponse fetched = client.get().uri("/api/products/" + created.id())
+        ProductResponse fetched = anonymous.get().uri("/api/products/" + created.id())
                 .exchange()
                 .expectStatus().isOk()
                 .expectBody(ProductResponse.class)
@@ -110,7 +113,7 @@ class ProductCrudIT extends AbstractPostgresIT {
     @Test
     void delete_removesItAndASecondReadIs404() {
         // GIVEN
-        ProductResponse created = client.post().uri("/api/products")
+        ProductResponse created = admin.post().uri("/api/products")
                 .body(request("IT Doomed", "1.00", 1, null))
                 .exchange()
                 .expectStatus().isCreated()
@@ -119,12 +122,12 @@ class ProductCrudIT extends AbstractPostgresIT {
         assertThat(created).isNotNull();
 
         // WHEN
-        client.delete().uri("/api/products/" + created.id())
+        admin.delete().uri("/api/products/" + created.id())
                 .exchange()
                 .expectStatus().isNoContent();
 
         // THEN
-        ApiError error = client.get().uri("/api/products/" + created.id())
+        ApiError error = anonymous.get().uri("/api/products/" + created.id())
                 .exchange()
                 .expectStatus().isNotFound()
                 .expectBody(ApiError.class)
@@ -138,7 +141,7 @@ class ProductCrudIT extends AbstractPostgresIT {
     void create_withAnInvalidBody_is400AndStoresNothing() {
         // GIVEN a blank name and a negative price
         // WHEN / THEN the validation advice answers before anything reaches the database
-        ApiError error = client.post().uri("/api/products")
+        ApiError error = admin.post().uri("/api/products")
                 .body(new ProductRequest("", null, new BigDecimal("-1"), -5, null))
                 .exchange()
                 .expectStatus().isBadRequest()
