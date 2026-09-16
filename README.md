@@ -847,3 +847,122 @@ makes it available to the wrong people, and every other test in the suite would 
   login — each is a real requirement for a real shop, and none belongs to this phase.
 - The administrator cannot see other people's orders either. An admin view would need its own
   endpoint and its own rule.
+
+---
+
+## Phase 9 — Stateless Authentication with JWT
+
+**Added:** JWT via Spring Security's OAuth2 Resource Server. HTTP Basic is gone: credentials are sent
+**once**, to `POST /api/auth/login`, and everything afterwards carries a signed token.
+
+- **`POST /api/auth/login`** returns an HS256 token with the role as a claim and a 15-minute expiry.
+- **Resource server** validates the signature and the expiry on every request — no session, no
+  database read.
+- **Signing key from `JWT_SECRET`**; nothing committed.
+- The principal is still a `SecurityUser`, so every controller and `@PreAuthorize` from Phase 8 is
+  untouched.
+
+### Log in and use the token
+
+```bash
+TOKEN=$(curl -s -XPOST localhost:8080/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@ecomdemo.local","password":"admin123"}' | jq -r .accessToken)
+
+curl -s -H "Authorization: Bearer $TOKEN" -XPOST localhost:8080/api/products \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Token Widget","description":"created with a bearer token","price":12.00,"stockQuantity":3}' | jq
+```
+
+```json
+{ "accessToken": "eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJlY29tZGVtbyIsInN1YiI6IjEiLC...",
+  "tokenType": "Bearer",
+  "expiresInSeconds": 900 }
+```
+
+### Look inside the token
+
+A JWT is three base64url segments. **Decode the middle one with no key at all:**
+
+```bash
+echo $TOKEN | cut -d. -f2 | base64 -d 2>/dev/null | jq
+```
+
+```json
+{
+  "iss": "ecomdemo",
+  "sub": "1",
+  "role": "ADMIN",
+  "exp": 1789560584,
+  "iat": 1789559684,
+  "email": "admin@ecomdemo.local"
+}
+```
+
+That is the whole point to internalise: **a JWT is signed, not encrypted.** Anyone holding it can
+read every claim. The signature does not hide the payload — it makes altering it detectable. Put
+nothing in a token you would not print on a postcard.
+
+### Watch a bad token get refused
+
+```bash
+curl -s localhost:8080/api/cart                                     # no token
+# {"status":401,"message":"Authentication required"}
+
+# flip one character of the payload and the signature no longer covers it
+TAMPERED=$(python3 -c "
+t='$TOKEN'.split('.'); s=t[1]; t[1]=s[:-1]+('B' if s[-1]=='A' else 'A'); print('.'.join(t))")
+curl -s -H "Authorization: Bearer $TAMPERED" localhost:8080/api/cart
+# {"status":401,"message":"Authentication required"}
+
+curl -s -XPOST localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+     -d '{"email":"admin@ecomdemo.local","password":"wrong"}'
+# {"status":401,"message":"Invalid email or password"}
+```
+
+The last message says neither whether the account exists nor which half was wrong — otherwise the
+endpoint becomes a way to discover registered email addresses.
+
+### The signing key
+
+```bash
+export JWT_SECRET=$(openssl rand -base64 48)
+./mvnw spring-boot:run
+```
+
+**Nothing is committed.** With `JWT_SECRET` unset the application generates a random key at startup
+and warns:
+
+```
+JWT_SECRET is not set - generated an ephemeral signing key. Tokens will stop working when this
+application restarts, and other instances will reject them. Set JWT_SECRET for anything beyond a
+single local process.
+```
+
+A fresh clone therefore works with no setup, and restarting invalidates every token — which is worth
+seeing once, because it makes concrete that **the key is the trust anchor**. A key shorter than 256
+bits fails at startup with a message telling you how to generate one, rather than at the first login.
+
+### Tests
+
+```bash
+./mvnw clean verify        # 124 unit + 28 integration
+./mvnw test -Dtest='TokenServiceTest'
+```
+
+`JwtAuthenticationIT` covers the lifecycle end to end; its valuable half is the refusals — no token,
+tampered payload, a token signed with someone else's key, an expired one, and gibberish.
+
+### Known limits of Phase 9
+
+- **A token cannot be revoked.** There is no server-side record to delete — that absence *is* the
+  statelessness. Demote a user and their existing token keeps its old role until it expires. The
+  15-minute expiry is what bounds that window; the phase's `docs/decisions.md` explains why a refresh
+  token was not added.
+- **HMAC means anyone who can verify can also forge.** Fine while one application does both; it stops
+  working the moment a second service needs to check tokens (Phase 20), which is what RS256 and an
+  external issuer solve.
+- **Swagger UI is not configured for bearer tokens** — there is no Swagger UI yet. Phase 3 (OpenAPI)
+  is still open, and should add the `bearerAuth` security scheme when it lands.
+- Tokens still travel unprotected over plain HTTP locally. Over the open internet this demands TLS
+  without exception: a bearer token is exactly as sensitive as the password it replaced.
