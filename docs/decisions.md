@@ -353,15 +353,22 @@ deadlock instantly. With the default `REQUIRED` the audit would simply join the 
 with it, producing a trail that is complete only for the cases that already worked — worse than no
 audit, because it looks trustworthy.
 
-**H2 and PostgreSQL race differently, and it changes what the test proves.** `ConcurrentOrderTest`
-asserts the invariant (one order, zero stock, never oversold) rather than which error the loser got,
-because that depends on the interleaving. Measured: on H2 the two transactions serialise and the
-version conflict fired **zero times in 40 races** — the loser was always turned away by an already
-empty cart. Against real PostgreSQL over HTTP it fired in **5 of 5 races**, and the audit trail shows
-the full path each time: `PLACED`, then `CONCURRENT_MODIFICATION`, then `EMPTY_CART` on the retry,
-returning 409. So the end-to-end test is necessary but not sufficient on H2, and `OptimisticLockTest`
-exists beside it to pin the lock down deterministically by creating the stale write in a fixed order.
-Phase 7 (Testcontainers) is what would let the concurrency test itself run on PostgreSQL.
+**The concurrency test asserts the invariant, not how the loser lost.** `ConcurrentOrderTest` checks
+one order, zero stock, never oversold — never which exception the losing thread received, because
+that depends on the interleaving and pinning it down would make it a test of the scheduler.
+`OptimisticLockTest` sits beside it and creates the stale write in a fixed order, so there is one
+place where the failure can only be the version check.
+
+> **Corrected in Phase 7.** This entry originally recorded that the version conflict fired **zero
+> times in 40 races on H2** and 5 of 5 against PostgreSQL, and concluded the engines race
+> differently. That was wrong: it was a flaw in how conflicts were counted, not a property of H2.
+> The count came from the exception the calling thread finally saw — but `@Retryable` retries the
+> rejected thread, the retry finds the cart already consumed, and a `ConflictException` is what
+> surfaces, hiding the lock entirely from outside. Counted from the `CONCURRENT_MODIFICATION` audit
+> rows instead, **the lock fires on both engines, five times in five rounds on each.** The audit
+> trail was the reliable evidence all along, which is a small argument for the audit table itself.
+> The case for running this against PostgreSQL in Phase 7 still stands — it is what production runs —
+> but not on the grounds originally given.
 
 **Optimistic, not pessimistic.** Optimistic locking takes no locks and blocks nothing; it detects the
 collision at write time and makes the loser redo the work. That suits a catalogue — read constantly,

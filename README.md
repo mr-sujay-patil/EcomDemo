@@ -620,12 +620,16 @@ green.
 | `OrderPlacementTest` | the checkout rules (moved here from `OrderServiceTest`) |
 
 **An honest caveat about the concurrency test.** It asserts the invariant — one order, zero stock —
-not *how* the loser lost, because that depends on the interleaving. On H2 the two transactions
-serialise: across 40 races the version conflict never fired once, and the loser was always turned
-away by an empty cart. On real PostgreSQL it fires every time. Both outcomes are correct and both
-pass, which is exactly why `OptimisticLockTest` exists alongside it to pin the lock down
-deterministically. Phase 7 (Testcontainers) is what would let the concurrency test run on PostgreSQL
-too.
+not *how* the loser lost, because that depends on the interleaving. Both endings are correct and both
+pass, which is why `OptimisticLockTest` sits alongside it to pin the lock down deterministically.
+
+> **Correction, made in Phase 7.** This section originally claimed the version conflict "never fired
+> once" on H2 across 40 races, and fired every time on PostgreSQL. That was a measurement error, not
+> a difference between the engines. The count came from the exception the calling thread finally saw
+> — but a thread whose write is rejected by the version check is retried by `@Retryable`, and the
+> retry finds the cart already consumed, so a `ConflictException` is what surfaces and the lock is
+> invisible from outside. Counted properly, from the `CONCURRENT_MODIFICATION` audit rows, **the lock
+> fires on both engines — five times in five rounds on each.**
 
 ### Known limits of Phase 6
 
