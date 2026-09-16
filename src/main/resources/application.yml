@@ -48,3 +48,7 @@ server:
 logging:
   level:
     org.hibernate.orm.jdbc.bind: trace   # shows the values bound to '?' placeholders in the SQL above
+    # HIT / MISS / PUT / EVICT for every cache operation. On by default here because watching the
+    # second read not reach the database is the whole point of Phase 13; a real deployment would
+    # leave this at INFO.
+    com.ecomdemo.cache: debug

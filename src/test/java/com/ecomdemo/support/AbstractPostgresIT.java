@@ -11,6 +11,7 @@ import com.ecomdemo.customer.dto.RegisterRequest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.test.web.servlet.client.RestTestClient;
+import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
@@ -59,8 +60,26 @@ public abstract class AbstractPostgresIT {
     @ServiceConnection
     protected static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:18-alpine");
 
+    /**
+     * Redis, for the cache the application expects from Phase 13 on.
+     *
+     * <p>A plain {@code GenericContainer} rather than a dedicated module: Testcontainers 2.x has no
+     * Redis module in its BOM, and the community {@code com.redis:testcontainers-redis} targets the
+     * 1.x line. {@code @ServiceConnection(name = "redis")} is what tells Spring Boot which kind of
+     * service this generic container is, so it can contribute the host and port the same way it does
+     * for PostgreSQL.
+     *
+     * <p>Every integration test now gets one, because the integration tests run the production
+     * configuration and that configuration has a cache in it. Testing without one would test a
+     * different application.
+     */
+    @ServiceConnection(name = "redis")
+    protected static final GenericContainer<?> REDIS =
+            new GenericContainer<>("redis:8-alpine").withExposedPorts(6379);
+
     static {
         POSTGRES.start();
+        REDIS.start();
     }
 
     @LocalServerPort

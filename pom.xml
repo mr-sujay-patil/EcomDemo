@@ -67,6 +67,27 @@
         </dependency>
 
         <!--
+            Redis, as a cache rather than a datastore. Brings Lettuce (the default client) and the
+            connection factory; the cache abstraction itself comes from the starter below.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!--
+            Spring's cache abstraction - @Cacheable and friends - plus, via spring-boot-cache, the
+            auto-configuration that turns spring.cache.type=redis into a RedisCacheManager.
+
+            The abstraction is the point: the annotations name no vendor, so the same code runs on a
+            local ConcurrentHashMap in tests that do not want a container, and on Redis in production.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-cache</artifactId>
+        </dependency>
+
+        <!--
             OAuth2 Resource Server: validates the Bearer token on every request.
 
             It pulls in spring-security-oauth2-jose, which carries both NimbusJwtDecoder (verify a

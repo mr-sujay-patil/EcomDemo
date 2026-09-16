@@ -9,6 +9,7 @@ import com.ecomdemo.common.ConflictException;
 import com.ecomdemo.customer.CustomerService;
 import com.ecomdemo.order.dto.OrderResponse;
 import com.ecomdemo.product.Product;
+import com.ecomdemo.product.ProductService;
 
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Component;
@@ -41,17 +42,20 @@ class OrderPlacement {
     private final OrderRepository orderRepository;
     private final CartService cartService;
     private final CustomerService customerService;
+    private final ProductService productService;
     private final OrderAuditService orderAuditService;
     private final Clock clock;
 
     OrderPlacement(OrderRepository orderRepository,
                    CartService cartService,
                    CustomerService customerService,
+                   ProductService productService,
                    OrderAuditService orderAuditService,
                    Clock clock) {
         this.orderRepository = orderRepository;
         this.cartService = cartService;
         this.customerService = customerService;
+        this.productService = productService;
         this.orderAuditService = orderAuditService;
         this.clock = clock;
     }
@@ -90,6 +94,16 @@ class OrderPlacement {
             Product product = cartItem.getProduct();
             product.reduceStock(cartItem.getQuantity());
             order.addItem(new OrderItem(order, product, cartItem.getQuantity()));
+
+            // Stock just changed, and the catalogue caches it. Without this the shop would keep
+            // showing the pre-order figure until the entry expired - visibly wrong immediately after
+            // buying something.
+            //
+            // The eviction happens inside this transaction, which leaves a small race: a concurrent
+            // reader can miss, load the still-uncommitted old row, and repopulate the cache with it.
+            // The TTL bounds how long that lasts. Closing it properly means evicting after commit,
+            // which is a transaction synchronisation and more machinery than this phase needs.
+            productService.evictFromCache(product.getId());
         }
         Order saved = orderRepository.save(order);
 

@@ -20,6 +20,20 @@ spring:
       max-lifetime: 1800000        # ms before a connection is retired (30 min) - must stay below any
                                    # database or network idle timeout, or the pool hands out dead sockets
 
+  # Redis is a cache here, never a source of truth: everything in it can be rebuilt from PostgreSQL.
+  # Defaults point at a local instance; compose overrides the host to the service name.
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Fail fast rather than hang a request. A cache that is slow to answer is worse than one that
+      # is absent - the point of it was to be quicker than the database.
+      timeout: 2s
+      connect-timeout: 2s
+
+  cache:
+    type: redis
+
   jpa:
     hibernate:
       # Flyway owns the schema from Phase 5 on. `validate` makes Hibernate compare the @Entity
