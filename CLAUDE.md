@@ -242,7 +242,8 @@ repository and flow tests stay flat.
 | Unit | `@ExtendWith(MockitoExtension.class)` | nothing | every service method — success path **and** at least one failure path |
 | Web slice | `@WebMvcTest(XController.class)` | controller, Jackson, validation, error advice | status codes, JSON shape, headers, exception → status mapping |
 | JPA slice | `@DataJpaTest` | Hibernate, repositories, embedded H2 | hand-written `@Query` only — never Spring Data's generated methods |
-| Integration | `@SpringBootTest` | everything, real port | keep it to one flow test; the pyramid's apex stays small |
+| Integration | `@SpringBootTest` | everything, real port | a flow that must cross layers, on H2 |
+| **End-to-end** | `*IT.java` extending `AbstractPostgresIT` | everything + a real PostgreSQL container | anything whose correctness depends on the real database |
 | Configuration | `ApplicationContextRunner` | one auto-configuration, no server | what the `application-*.yml` files actually bind to (`DatasourceProfileTest`) |
 
 **Anything that builds a datasource must declare `@ActiveProfiles("test")`** — `@DataJpaTest`,
@@ -254,6 +255,21 @@ running. `@WebMvcTest` creates no datasource and needs no profile.
 setting in the wrong profile only shows up under load. `DatasourceProfileTest` binds the real YAML
 with `ConfigDataApplicationContextInitializer` and asserts what the container ends up with — no
 database is contacted, because HikariCP opens no connection until one is asked for.
+
+**Surefire runs `*Test.java`; Failsafe runs `*IT.java`.** The suffix is the whole routing rule — their
+default include patterns already separate them, so a test named `FooIT` runs at `verify` against a
+real PostgreSQL container and a test named `FooTest` runs at `test` with no Docker requirement at
+all. Never name an integration test `*Test`: it would then run under Surefire, which aborts the build
+on first failure and would leave containers behind.
+
+**Integration tests extend `AbstractPostgresIT`.** It holds one container for the whole JVM (a static
+field, the singleton pattern), exposes a `RestTestClient` bound to the real port, and lets
+`@ServiceConnection` wire the random host port into the context. They run under the default `dev`
+profile, so the Flyway migrations and `ddl-auto: validate` are exercised on the real engine.
+
+**An IT may not assume an empty table.** Every IT shares one container and commits as it goes.
+Create the rows a test needs, assert on those, and never on counts. If a test needs the shared cart
+empty, it empties it in `@BeforeEach`.
 
 **Spring Boot 4 specifics.** `@WebMvcTest` and `@DataJpaTest` come from the separate
 `spring-boot-webmvc-test` and `spring-boot-data-jpa-test` modules. `@MockBean` is removed — use

@@ -53,7 +53,7 @@ flowchart LR
 | 4 | PostgreSQL | Data | ✅ Complete |
 | 5 | Flyway migrations | Data | ✅ Complete |
 | 6 | Transactions & concurrency | Data | ✅ Complete |
-| 7 | Testcontainers | Data | ⬜ |
+| 7 | Testcontainers | Data | ✅ Complete |
 | 8 | Spring Security (users & roles) | Security | ⬜ |
 | 9 | JWT authentication | Security | ⬜ |
 | 10 | Containerization (Docker & Compose) | Quality & Delivery | ⬜ |

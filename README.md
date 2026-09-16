@@ -642,3 +642,95 @@ pass, which is why `OptimisticLockTest` sits alongside it to pin the lock down d
   update it permits; raising the isolation level instead would be a bigger hammer with a bigger cost.
 - The retry delay is fixed with jitter, not exponential backoff. Fine for three attempts.
 - The audit table has no retention policy. It grows forever.
+
+---
+
+## Phase 7 — Integration Testing with Real Infrastructure
+
+**Added:** Testcontainers. The integration tests now run against a real PostgreSQL that the build
+starts and throws away, instead of H2 imitating one.
+
+- **`AbstractPostgresIT`** — one PostgreSQL 18 container, shared by every integration test in the run.
+- **Three feature ITs** — `ProductCrudIT`, `CartFlowIT`, `PlaceOrderIT`, all over HTTP.
+- **`ConcurrentOrderIT`** — Phase 6's race, moved onto the real engine.
+- **Surefire / Failsafe split** — `*Test.java` are unit and slice tests; `*IT.java` are integration
+  tests. `./mvnw test` needs no Docker at all.
+
+### Running them
+
+```bash
+./mvnw test        # 94 unit and slice tests, ~7s, no Docker needed
+./mvnw verify      # the above, plus 16 integration tests against real PostgreSQL
+```
+
+Docker must be running for `verify`. Nothing else is required — no database to install, no port to
+free, no cleanup:
+
+```
+Creating container for image: postgres:18-alpine
+Container postgres:18-alpine started in PT0.988696S
+Container is started (JDBC URL: jdbc:postgresql://localhost:52188/test)
+Database: jdbc:postgresql://localhost:52188/test (PostgreSQL 18.6)
+```
+
+That last line is Flyway. **The migrations are now executed against real PostgreSQL on every build** —
+something no test could check before this phase.
+
+### How the container is wired
+
+```java
+@ServiceConnection
+protected static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:18-alpine");
+
+static { POSTGRES.start(); }
+```
+
+Three deliberate details:
+
+- **`static` + a static initialiser** is the *singleton container* pattern. A static field is
+  initialised once per JVM, so all four ITs share one container and pay the ~1s startup once. The
+  more familiar `@Testcontainers` + `@Container` does the opposite — it hands the lifecycle to JUnit,
+  which starts and stops a container per test class.
+- **Nothing stops it.** Testcontainers runs a sidecar (Ryuk) that removes the containers when the JVM
+  exits, including when it exits badly. A shutdown hook cannot promise that.
+- **`@ServiceConnection`** takes the container's random host port and contributes the JDBC URL, user
+  and password to the environment before the context refreshes — replacing a hand-written
+  `@DynamicPropertySource` block.
+
+The ITs run under the default **`dev` profile** — the same configuration the application uses, with
+only the connection details swapped. So `ddl-auto: validate` applies and Flyway builds the schema.
+
+### Testcontainers 2.x has different coordinates
+
+Worth knowing, because every tutorial predates it:
+
+```xml
+<!-- Testcontainers 2.x -->
+<artifactId>testcontainers-postgresql</artifactId>   <!-- org.testcontainers.postgresql.PostgreSQLContainer -->
+
+<!-- 1.x, what you will find written everywhere -->
+<artifactId>postgresql</artifactId>                  <!-- org.testcontainers.containers.PostgreSQLContainer -->
+```
+
+`org.testcontainers:postgresql` has no 2.x release at all — its last is 1.21.4. Because Spring Boot
+4.1.1 manages Testcontainers 2.0.5, using the familiar coordinate means silently mixing major
+versions.
+
+### Tests
+
+| Level | Plugin | Pattern | Database | Docker |
+|---|---|---|---|---|
+| Unit, web slice, JPA slice | Surefire | `*Test.java` | H2 (or none) | no |
+| Integration | Failsafe | `*IT.java` | real PostgreSQL | yes |
+
+H2 stays for the fast tests deliberately: the inner loop stays a few seconds and needs nothing
+installed. The ITs are what cover the fidelity gap.
+
+### Known limits of Phase 7
+
+- The slice tests (`@DataJpaTest`) still run on H2, so a PostgreSQL-specific problem in a
+  hand-written query would be caught by the ITs, not by them.
+- Container reuse between builds (`withReuse(true)`) is not enabled. It would save ~1s per run but
+  has to be opted into per developer, and state surviving between runs makes tests order-dependent.
+- The ITs share one container and commit as they go, so none of them may assume an empty table.
+- No CI runs any of this yet — Phase 11.
