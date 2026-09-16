@@ -1,0 +1,21 @@
+# The profile the test suite runs under (@ActiveProfiles("test")).
+#
+# Tests keep an embedded database so `./mvnw clean verify` needs no installed server and no network.
+# MODE=PostgreSQL makes H2 accept PostgreSQL syntax and DATABASE_TO_LOWER mirrors PostgreSQL's habit
+# of folding unquoted identifiers to lower case - which narrows, but does not close, the gap between
+# what the tests exercise and what production runs. Phase 7 closes it properly with Testcontainers.
+spring:
+  datasource:
+    url: jdbc:h2:mem:ecomdemo-test;DB_CLOSE_DELAY=-1;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop        # a fresh schema per run: tests must never depend on leftover state
+    defer-datasource-initialization: true   # ...so data.sql runs AFTER that, not before
+
+  sql:
+    init:
+      mode: always                 # seed the catalogue for every test run
