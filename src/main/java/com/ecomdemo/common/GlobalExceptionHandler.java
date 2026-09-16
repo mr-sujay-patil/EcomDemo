@@ -54,7 +54,7 @@ public class GlobalExceptionHandler {
     /** A constraint on a method parameter (a path variable or request param) was violated. */
     @ExceptionHandler(HandlerMethodValidationException.class)
     public ResponseEntity<ApiError> handleParameterValidation(HandlerMethodValidationException ex) {
-        String message = ex.getAllValidationResults().stream()
+        String message = ex.getParameterValidationResults().stream()
                 .flatMap(result -> result.getResolvableErrors().stream())
                 .map(error -> error.getDefaultMessage() == null ? "invalid value" : error.getDefaultMessage())
                 .collect(Collectors.joining("; "));
