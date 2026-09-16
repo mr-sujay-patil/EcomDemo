@@ -941,6 +941,17 @@
           "legendFormat": "{{kind}}",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(resilience4j_circuitbreaker_not_permitted_calls_total{application=~\"$service\", name=\"catalog\"}[1m]))",
+          "legendFormat": "not_permitted",
+          "range": true,
+          "refId": "B"
         }
       ],
       "fieldConfig": {

@@ -149,6 +149,29 @@ class ResilienceConfigurationTest {
         }
 
         @Test
+        void catalog_never_retriesAnOpenCircuit() {
+            runner.run(context -> {
+                var config = context.getBean(RetryRegistry.class).retry("catalog").getRetryConfig();
+
+                // Retry is the OUTERMOST decorator, so a breaker rejection arrives here as an
+                // ordinary exception and would be retried like any other - waiting, trying again,
+                // and being rejected again.
+                //
+                // Measured on the running stack before this was fixed: an open circuit answered in
+                // ~700ms instead of microseconds, and not_permitted read 48 for 16 requests. The
+                // whole value of an open circuit is failing FAST; spending two backoff sleeps to be
+                // told the same no three times holds a request thread for nothing.
+                assertThat(config.getExceptionPredicate().test(
+                        io.github.resilience4j.circuitbreaker.CallNotPermittedException
+                                .createCallNotPermittedException(
+                                        context.getBean(CircuitBreakerRegistry.class)
+                                                .circuitBreaker("catalog"))))
+                        .as("an open circuit must not be retried")
+                        .isFalse();
+            });
+        }
+
+        @Test
         void catalog_never_retriesAClientError() {
             runner.run(context -> {
                 var config = context.getBean(RetryRegistry.class).retry("catalog").getRetryConfig();

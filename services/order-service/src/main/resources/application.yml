@@ -155,10 +155,25 @@ resilience4j:
         enableRandomizedWait: true
         randomizedWaitFactor: 0.5
 
-        # Same reasoning as the breaker: a 404 is an answer and must not be retried. Retrying it
-        # would triple the load for a question already answered.
         ignoreExceptions:
+          # Same reasoning as the breaker: a 404 is an answer and must not be retried. Retrying it
+          # would triple the load for a question already answered.
           - org.springframework.web.client.HttpClientErrorException
+
+          # AND an open circuit must not be retried, which is the subtler of the two and was found by
+          # running the stack rather than by reading the config.
+          #
+          # Retry is the OUTERMOST decorator, so when the breaker rejects a call it throws
+          # CallNotPermittedException and the retry treats that like any other failure: it waits and
+          # tries again, twice, and the breaker rejects it twice more. Measured here, an open circuit
+          # was answering in ~700ms instead of microseconds, and the not_permitted counter read 48
+          # for 16 requests - three rejections each.
+          #
+          # That defeats the entire purpose. The value of an open circuit is that it fails FAST;
+          # spending 700ms and two backoff sleeps to be told "no" three times is worse than useless,
+          # because it holds a request thread for the duration while achieving nothing. There is
+          # nothing to retry: the breaker's answer will not change within the backoff window.
+          - io.github.resilience4j.circuitbreaker.CallNotPermittedException
 
   bulkhead:
     instances:

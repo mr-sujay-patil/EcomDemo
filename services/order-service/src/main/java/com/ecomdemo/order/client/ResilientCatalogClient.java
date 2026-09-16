@@ -36,13 +36,13 @@ import org.springframework.web.client.RestClientResponseException;
  * {@code Retry → CircuitBreaker → RateLimiter → TimeLimiter → Bulkhead}. That ordering is the one
  * that makes sense and it is worth understanding rather than accepting.
  *
- * <p>With retry outermost, three attempts that all fail are recorded by the breaker as <em>three</em>
- * failed calls... which is the part people get wrong when they reverse it. Put the breaker outside
- * instead and an open circuit would be retried - three fast rejections per request, achieving
- * nothing except making the caller wait three times to be told the same no. Retry outside means the
- * breaker sees each attempt, opens on the aggregate failure rate, and then short-circuits the whole
- * retry sequence at once: when the circuit is open, {@link #findById} fails immediately without any
- * attempt at all.
+ * <p>With retry outermost, the breaker sees each individual attempt and opens on the aggregate
+ * failure rate; once open, it short-circuits the whole retry sequence at once, so {@link #findById}
+ * fails immediately without any attempt reaching the network.
+ *
+ * <p>That last part only works if the retry is told not to retry an open circuit - see
+ * {@code ignoreExceptions} in {@code application.yml}, and the note on fallback placement below.
+ * Getting either wrong turns "fail fast" into "fail three times slowly".
  *
  * <h2>What the fallback does, and what it deliberately does not</h2>
  *
@@ -71,16 +71,34 @@ public class ResilientCatalogClient implements CatalogClient {
         this.delegate = delegate;
     }
 
+    /*
+     * Note where fallbackMethod is: on @Retry, the OUTERMOST decorator, and not on @CircuitBreaker.
+     * That placement is load-bearing and the first version of this class got it wrong.
+     *
+     * A fallback runs inside the aspect that declares it. With it on @CircuitBreaker, an open
+     * circuit's CallNotPermittedException was caught and translated to ServiceUnavailableException
+     * there - so the retry outside received a type it had never heard of, its ignoreExceptions entry
+     * for CallNotPermittedException could not match a type it never saw, and it dutifully retried an
+     * open circuit three times. Measured on the running stack: 3 rejections per request and ~700ms
+     * spent to be told the same no three times, when the whole value of an open circuit is failing
+     * in microseconds.
+     *
+     * With it on the outermost decorator, each layer sees raw failures and decides for itself:
+     * the breaker counts a ResourceAccessException, the retry retries it, and a CallNotPermitted-
+     * Exception reaches the retry unchanged so it can decline to retry it. Translation happens once,
+     * at the edge, after everything else has had its say.
+     */
+
     @Override
-    @CircuitBreaker(name = CATALOG, fallbackMethod = "findByIdUnavailable")
-    @Retry(name = CATALOG)
+    @Retry(name = CATALOG, fallbackMethod = "findByIdUnavailable")
+    @CircuitBreaker(name = CATALOG)
     public CatalogProduct findById(Long id) {
         return delegate.findById(id);
     }
 
     @Override
-    @CircuitBreaker(name = CATALOG, fallbackMethod = "findAllUnavailable")
-    @Retry(name = CATALOG)
+    @Retry(name = CATALOG, fallbackMethod = "findAllUnavailable")
+    @CircuitBreaker(name = CATALOG)
     public List<CatalogProduct> findAll() {
         return delegate.findAll();
     }
