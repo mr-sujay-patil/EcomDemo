@@ -1,5 +1,7 @@
 package com.ecomdemo.common;
 
+import com.ecomdemo.auth.JwtSecurityUserConverter;
+
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -48,7 +50,9 @@ public class WebSecurityConfiguration {
      */
     @Bean
     @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
-    public SecurityFilterChain filterChain(HttpSecurity http, ApiErrorResponder apiErrorResponder)
+    public SecurityFilterChain filterChain(HttpSecurity http,
+                                           ApiErrorResponder apiErrorResponder,
+                                           JwtSecurityUserConverter jwtSecurityUserConverter)
             throws Exception {
         return http
                 /*
@@ -78,8 +82,10 @@ public class WebSecurityConfiguration {
                         // would swallow the specific one.
                         .requestMatchers(HttpMethod.GET, "/api/products", "/api/products/**").permitAll()
 
-                        // You cannot be required to log in in order to sign up.
+                        // You cannot be required to log in in order to sign up, and you cannot be
+                        // required to present a token in order to obtain one.
                         .requestMatchers(HttpMethod.POST, "/api/customers/register").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/auth/login").permitAll()
 
                         // Everything else under /api/products changes the catalogue.
                         .requestMatchers("/api/products", "/api/products/**").hasRole("ADMIN")
@@ -93,12 +99,21 @@ public class WebSecurityConfiguration {
                         .anyRequest().authenticated())
 
                 /*
-                 * HTTP Basic: the credentials are sent on every request, base64-encoded - which is
-                 * encoding, not encryption, and readable by anyone who can see the traffic. It is
-                 * acceptable here because this is a local learning project over localhost; in the
-                 * open it would require TLS without exception. Phase 9 replaces it with JWT.
+                 * Bearer tokens instead of HTTP Basic.
+                 *
+                 * The BearerTokenAuthenticationFilter reads the Authorization header, hands the token
+                 * to the JwtDecoder - which recomputes the signature and checks exp - and, if it
+                 * holds up, converts the claims into an Authentication. A token that has been edited
+                 * fails the signature check; one that is past its expiry fails the time check; either
+                 * way the request never reaches a controller.
+                 *
+                 * The difference from Basic is what is NOT here: no password is transmitted after
+                 * login, and nothing is looked up. Verification is a hash computation against a key
+                 * the process already holds.
                  */
-                .httpBasic(basic -> basic.authenticationEntryPoint(apiErrorResponder))
+                .oauth2ResourceServer(oauth2 -> oauth2
+                        .authenticationEntryPoint(apiErrorResponder)
+                        .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtSecurityUserConverter)))
 
                 .exceptionHandling(handling -> handling
                         .authenticationEntryPoint(apiErrorResponder)

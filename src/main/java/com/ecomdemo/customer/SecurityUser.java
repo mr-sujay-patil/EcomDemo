@@ -29,11 +29,31 @@ public class SecurityUser implements UserDetails {
     private final String passwordHash;
     private final Customer.Role role;
 
+    /** From the database, at login: this is the one that carries a password to check. */
     public SecurityUser(Customer customer) {
-        this.id = customer.getId();
-        this.email = customer.getEmail();
-        this.passwordHash = customer.getPasswordHash();
-        this.role = customer.getRole();
+        this(customer.getId(), customer.getEmail(), customer.getPasswordHash(), customer.getRole());
+    }
+
+    /**
+     * From a verified JWT's claims, on every subsequent request.
+     *
+     * <p>No password, because there is nothing to check: the signature already proved the token was
+     * issued by us and has not been altered. No database read either - everything a request needs
+     * about the caller travelled in the token, which is what "stateless" means in practice.
+     *
+     * <p>The cost is that the token is a snapshot. Demote a user to CUSTOMER and their existing ADMIN
+     * token keeps working until it expires, because nothing re-reads the row. That is the trade the
+     * short expiry exists to bound.
+     */
+    public SecurityUser(Long id, String email, Customer.Role role) {
+        this(id, email, null, role);
+    }
+
+    private SecurityUser(Long id, String email, String passwordHash, Customer.Role role) {
+        this.id = id;
+        this.email = email;
+        this.passwordHash = passwordHash;
+        this.role = role;
     }
 
     public Long getId() {

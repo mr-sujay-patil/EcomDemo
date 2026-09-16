@@ -27,6 +27,20 @@ spring:
           # and the engine as variables at once.
           time_zone: UTC
 
+# Everything this application needs to sign and verify its own tokens.
+ecomdemo:
+  jwt:
+    # No default and nothing committed. When it is unset the application generates a random key at
+    # startup and logs a warning: a fresh clone works immediately, and tokens simply do not survive a
+    # restart - which is honest, because the key that signed them is gone.
+    #
+    # Generate a real one with:  openssl rand -base64 48
+    secret: ${JWT_SECRET:}
+
+    # Short, because a JWT cannot be withdrawn once issued. The window in which a stolen or stale
+    # token still works is exactly its remaining lifetime.
+    expiry: 15m
+
 server:
   error:
     include-stacktrace: never
