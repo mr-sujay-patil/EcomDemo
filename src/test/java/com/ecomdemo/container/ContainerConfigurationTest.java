@@ -70,11 +70,11 @@ class ContainerConfigurationTest {
         void dockerfile_always_extractsTheLayeredJar() {
             // THEN the layers are exploded and copied one at a time, which is what lets Docker cache
             // the 59 MB of dependencies separately from the 426 kB of application code
+            // One chain: .as() applies from where it appears onwards, so the description still
+            // belongs to the layer assertions rather than to the whole thing.
             assertThat(instructions)
                     .contains("-Djarmode=tools")
-                    .contains("extract --layers");
-
-            assertThat(instructions)
+                    .contains("extract --layers")
                     .as("one COPY per layer, or the caching is pointless")
                     .contains("/extracted/dependencies/")
                     .contains("/extracted/spring-boot-loader/")

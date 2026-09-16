@@ -1162,3 +1162,113 @@ breaks a test arrives as a red pull request rather than as a surprise months lat
   stricter; Dependabot is what keeps the tags honest in the meantime.
 - **The runner is `ubuntu-latest`**, also a moving target by design.
 - No caching of the Testcontainers PostgreSQL image, so each run pulls it.
+
+---
+
+## Phase 12 — Code Quality
+
+**Added:** JaCoCo for coverage and SonarQube Community Edition for static analysis, with a quality
+gate that fails the build.
+
+### Results
+
+| Metric | Value | Rating |
+|---|---|---|
+| Lines of code | 1,758 | |
+| Coverage | **92.8%** (line 94.5%, branch 63.3%) | |
+| Duplication | 0.0% | |
+| Bugs | **0** | Reliability **A** |
+| Vulnerabilities | **0** | Security **A** |
+| Security hotspots | 0 | |
+| Code smells | **0** | Maintainability **A** |
+| Technical debt | **0 min** | |
+| Complexity | cyclomatic 205, cognitive 17 | |
+
+**Quality gate: PASSED** — all five conditions evaluated:
+
+```
+[ ok ] new_coverage                 actual=100.0   LT 70
+[ ok ] new_duplicated_lines_density actual=  0.0   GT 3
+[ ok ] new_blocker_violations       actual=    0   GT 0
+[ ok ] new_critical_violations      actual=    0   GT 0
+[ ok ] new_violations               actual=    0   GT 0
+```
+
+It started at 14 bugs, 1 vulnerability and 27 code smells with 130 minutes of debt.
+
+### Running it
+
+```bash
+docker compose -f compose.sonar.yaml up -d      # SonarQube + its own PostgreSQL, ~60s to start
+./mvnw clean verify                             # produces the merged JaCoCo report
+./mvnw sonar:sonar -Dsonar.host.url=http://localhost:9000 -Dsonar.token=<token>
+
+open http://localhost:9000                      # admin / the password you set on first login
+docker compose -f compose.sonar.yaml down       # add -v to discard the analysis history
+```
+
+`verify` must run first: **Sonar does not measure coverage**, it reads a report JaCoCo produced. Run
+`sonar:sonar` on its own and it reports 0% rather than an error.
+
+Coverage locally, without SonarQube at all:
+
+```bash
+./mvnw clean verify && open target/site/jacoco-merged/index.html
+```
+
+### The quality gate
+
+`sonar.qualitygate.wait=true` means the scanner polls after uploading and **fails the Maven build**
+if the gate is red — it is not a dashboard nobody opens. It only applies to `sonar:sonar`, so
+`./mvnw verify` needs no server.
+
+That gate genuinely failed mid-phase (`new_violations: 1`) and failed the build with it, which is the
+only evidence that it enforces anything.
+
+### What SonarQube found, and what I did about it
+
+| Finding | Count | Action |
+|---|---|---|
+| `S2119` `SecureRandom` constructed per call | 1 bug | **Fixed** — hoisted to a static field |
+| `S8491` dangling Javadoc | 2 smells | **Fixed** — and both were real documentation bugs (below) |
+| `S1130`/`S112` `throws Exception` that cannot be thrown | 2 smells | **Fixed** — verified by removing it and compiling |
+| `S6213` method named `record` | 1 smell | **Fixed** — renamed to `recordAttempt()` |
+| `S5778` ambiguous `assertThatThrownBy` lambdas | 7 smells | **Fixed** — arguments hoisted out of the lambda |
+| `S1128` unused imports, `S5838`, `S5853` chains | 15 smells | **Fixed** |
+| `S5845` "dissimilar types" in assertions | 13 bugs | **False positive** — proven, marked in SonarQube |
+| `S4502` CSRF disabled | 1 vulnerability | **Accepted** — with the Phase 8 justification recorded on the issue |
+
+**The two documentation bugs are the ones worth noticing.** Sonar flagged two Javadoc blocks stacked
+on one method — leftovers from my own script-driven edits in earlier phases. In
+`SecurityConfiguration` the effect was worse than duplication: a Phase 9 edit had inserted
+`authenticationManager` *between* the `passwordEncoder` Javadoc and its method, so one method carried
+documentation describing the other and `passwordEncoder` had none. No test could ever have caught
+that.
+
+**The 13 "critical bugs" were not bugs.** `S5845` flags `assertThat(x).isEqualTo(2)` inside
+`MockMvcTester`'s `hasPathSatisfying`, where Sonar sees `Object` compared to `int`. AssertJ's
+`AssertProvider` overload actually resolves to a JSON-value assert. Rather than trust either the tool
+or myself, I changed an expected value and ran the test:
+
+```
+expected: 999
+ but was: 2
+```
+
+The assertion is live. They are marked false positive in SonarQube **with that evidence in the
+comment**, not silently suppressed in code.
+
+### Known limits of Phase 12
+
+- **The first analysis passed the gate vacuously.** With no previous analysis there is no "new code",
+  so every new-code condition had nothing to measure and the gate reported OK having evaluated
+  *nothing*. Only the second analysis was a real verdict. Worth knowing before trusting a green gate
+  on a brand-new project.
+- **Branch coverage is 63.3%** against 94.5% line coverage. Lines are easy; branches are where
+  untested paths hide. There is no gate condition on it.
+- **SonarQube is not in CI.** Analysis is a local command someone must remember to run. SonarCloud
+  with PR decoration is the fix, and needs an account plus a `SONAR_TOKEN` secret.
+- **The analysis token is not committed** and cannot be — regenerate it from the UI if you rebuild
+  the SonarQube volume.
+- The `sonarqube:lts-community` tag is the 9.9 line, whose schema migrations **fail on PostgreSQL 18**.
+  `compose.sonar.yaml` uses current CE with PostgreSQL 16 for that reason.

@@ -73,13 +73,12 @@ class TokenServiceTest {
 
         // THEN the subject is the customer id - what every controller and query actually needs, and
         // the one thing about a user that never changes
+        // The role is in there too: the authorization decision travels in the token, which is what
+        // lets a request be authorized with no database read at all.
         assertThat(payload)
                 .contains("\"sub\":\"42\"")
-                .contains("\"email\":\"sam@example.com\"");
-
-        // AND the authorization decision travels in the token, which is what lets a request be
-        // authorized with no database read at all
-        assertThat(payload).contains("\"role\":\"CUSTOMER\"");
+                .contains("\"email\":\"sam@example.com\"")
+                .contains("\"role\":\"CUSTOMER\"");
     }
 
     @Test
