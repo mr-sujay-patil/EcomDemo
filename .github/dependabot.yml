@@ -1,0 +1,51 @@
+# Dependency updates, opened as pull requests.
+#
+# Which means they go through the same CI as everything else: a bump that breaks a test arrives as a
+# red pull request rather than as a surprise in six months. That is the point of having it here
+# rather than upgrading by hand occasionally - the tests decide, not the calendar.
+
+version: 2
+
+updates:
+
+  # Maven: Spring Boot, PostgreSQL, Testcontainers and everything they drag in.
+  - package-ecosystem: maven
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    # Enough to notice, few enough to read. Dependabot opens the most important ones first when
+    # capped, and an unread pile of thirty is worse than five that get looked at.
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    labels: ["dependencies"]
+    groups:
+      # One pull request for the whole Spring Boot family rather than fifteen. They are released
+      # together and only make sense together - upgrading spring-security-core without
+      # spring-security-config is not an upgrade anybody wants to test.
+      spring:
+        patterns:
+          - "org.springframework*"
+          - "org.springframework.boot:*"
+      test-tooling:
+        patterns:
+          - "org.testcontainers:*"
+          - "org.junit*"
+          - "org.assertj:*"
+          - "org.mockito:*"
+
+  # The actions used in ci.yml. These pin to major versions (@v4), which still move underneath you:
+  # a tag is mutable, and actions/checkout@v4 today is not the commit it was last year. Dependabot
+  # is what turns that into a visible, tested change.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    labels: ["dependencies"]

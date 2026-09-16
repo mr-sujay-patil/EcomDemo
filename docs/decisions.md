@@ -719,3 +719,70 @@ what I would reach for on a team that would rather not own this file.
 - The health check probes a business endpoint because Actuator is Phase 15.
 - No resource limits on the postgres service, and no non-root user for it either - the official
   image handles that itself, but it is not something this project controls.
+
+---
+
+## Phase 11 — Continuous Integration
+
+**One workflow, two jobs, rather than two workflows.** `publish` declares `needs: verify`, which is
+what makes an untested image impossible to publish: the job is skipped entirely if the tests failed.
+Two separate workflows would have to coordinate through `workflow_run`, which is more machinery for a
+weaker guarantee.
+
+**Both `pull_request` and `push: [main]`.** Testing only pull requests would leave a gap that squash
+merges make real: the commit that lands on `main` is a new commit, and `main` can contain a
+combination neither branch had. Running again after the merge is what catches that, and it is also
+the trigger that publishes.
+
+**Permissions are read-only at the top and widened per job.** `packages: write` is granted to
+`publish` alone, so the job that compiles and runs tests - the one that executes the most untrusted
+code, including anything a dependency does at build time - cannot write to the registry. The
+repository default is read-only as well; the workflow states its own permissions anyway, so it keeps
+its posture if that default is ever loosened.
+
+**`GITHUB_TOKEN`, not a personal access token.** It is minted for the run, scoped by those
+permissions, and expires when the job ends - so there is no secret to create, store or rotate, and
+nothing tied to a person who might leave. This is the one case where "no secrets in source control"
+is satisfied by there being no secret at all.
+
+**Two tags per image, because they answer different questions.** The commit SHA is immutable and
+identifies exactly one commit: it is what a deployment references, what a rollback needs, and what
+makes "which code is running?" answerable. `latest` is mutable and always moves - useful for a human
+trying the current build, and actively wrong for anything that must be repeatable, since two machines
+pulling it an hour apart can get different code. Semantic version tags would be the third kind, and
+need releases to exist first.
+
+**Caching, in two places.** `setup-java`'s Maven cache is keyed on the hash of `pom.xml`, so a
+dependency change correctly invalidates it and everything else reuses it. The Docker layer cache
+(`type=gha`) means the 59 MB dependency layer built in Phase 10 survives *between* runs - that
+layering paid off within a build before; now it pays off across builds.
+
+**A workflow guards only the branches that carry it.** Discovered while demonstrating the gate: the
+first throwaway PR was branched from `main`, which did not yet have `ci.yml`, so **no checks ran at
+all**. The PR was still blocked - by a required check that never reported - which looks identical
+from the outside and is a completely different failure. Worth knowing before concluding that CI is
+"not working": for `pull_request` events GitHub uses the workflow from the PR's head.
+
+**GHCR rejects uppercase.** `ghcr.io/${{ github.repository }}` expands to
+`ghcr.io/mr-sujay-patil/EcomDemo` and fails on every push. The name is lower-cased in its own step.
+The registry is case-sensitive in a way the repository name is not.
+
+**Branch protection keeps `enforce_admins: true`.** The required check applies to the repository
+owner as well, which is the only version of the rule that means anything - a gate you can walk around
+is a suggestion. The Phase 11 pull request had to satisfy its own check before it could merge. The
+existing settings (linear history, conversation resolution, zero required approvals) were preserved:
+the protection API replaces the whole object, so a PUT that omits them silently turns them off.
+
+**Dependabot groups the Spring family.** Fifteen separate pull requests for artefacts that are
+released together and only work together is noise, not diligence; one grouped PR is a change somebody
+will actually review. The cap of five open PRs is the same reasoning - an unread pile of thirty is
+worse than five that get looked at.
+
+### Known gaps, deferred on purpose
+
+- No quality gate beyond "the tests pass" - coverage and static analysis are Phase 12.
+- Actions are pinned to mutable major tags (`@v4`) rather than commit SHAs.
+- The image is published but never deployed; that is Phases 25-26, and the difference between
+  continuous delivery and continuous deployment.
+- No cache for the Testcontainers PostgreSQL image, so every run pulls it.
+- No release/tag-triggered workflow, so there are no semantic version tags on images yet.
