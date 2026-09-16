@@ -6,7 +6,7 @@ import java.util.List;
 import com.ecomdemo.messaging.ProcessedEvent;
 import com.ecomdemo.messaging.ProcessedEventRepository;
 import com.ecomdemo.notification.dto.NotificationResponse;
-import com.ecomdemo.order.event.OrderPlacedEvent;
+import com.ecomdemo.notification.event.OrderPlacedEvent;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

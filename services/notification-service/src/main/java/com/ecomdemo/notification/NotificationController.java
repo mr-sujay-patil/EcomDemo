@@ -2,7 +2,7 @@ package com.ecomdemo.notification;
 
 import java.util.List;
 
-import com.ecomdemo.customer.SecurityUser;
+import com.ecomdemo.shared.security.SecurityUser;
 import com.ecomdemo.notification.dto.NotificationResponse;
 
 import org.springframework.security.core.annotation.AuthenticationPrincipal;

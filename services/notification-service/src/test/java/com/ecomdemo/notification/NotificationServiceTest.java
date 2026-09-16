@@ -9,7 +9,7 @@ import java.util.UUID;
 
 import com.ecomdemo.messaging.ProcessedEvent;
 import com.ecomdemo.messaging.ProcessedEventRepository;
-import com.ecomdemo.order.event.OrderPlacedEvent;
+import com.ecomdemo.notification.event.OrderPlacedEvent;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
