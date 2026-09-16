@@ -1,4 +1,4 @@
-# EcomDemo
+/u# EcomDemo
 
 A learning project that grows an e-commerce backend from a single Spring Boot monolith into a
 production-grade distributed system, adding **exactly one** technology per phase.

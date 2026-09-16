@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.security.core.AuthenticationException;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -119,6 +120,27 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiError> handleFailedLogin(AuthenticationException ex) {
         log.debug("Failed login attempt: {}", ex.getMessage());
         return build(HttpStatus.UNAUTHORIZED, "Invalid email or password");
+    }
+
+    /**
+     * Something this service depends on is not answering.
+     *
+     * <p>503, and deliberately not 409. The request was fine and the state was fine; we are the
+     * problem, and nothing the caller changes will help. See {@link ServiceUnavailableException} for
+     * why that distinction is worth a separate exception type.
+     *
+     * <p>Logged at WARN rather than ERROR: a dependency being briefly unavailable is an expected
+     * operating condition in a distributed system - it is what the circuit breaker exists to handle -
+     * and logging it at ERROR would train everybody to ignore ERROR. The Retry-After header tells a
+     * well-behaved client roughly when to come back, which is the only actionable thing there is to
+     * say.
+     */
+    @ExceptionHandler(ServiceUnavailableException.class)
+    public ResponseEntity<ApiError> handleServiceUnavailable(ServiceUnavailableException ex) {
+        log.warn("Dependency unavailable: {}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header(HttpHeaders.RETRY_AFTER, "10")
+                .body(new ApiError(HttpStatus.SERVICE_UNAVAILABLE.value(), ex.getMessage()));
     }
 
     /** An argument a service rejected outright. */

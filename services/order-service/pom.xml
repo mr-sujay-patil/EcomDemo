@@ -50,6 +50,47 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-kafka</artifactId>
         </dependency>
+
+        <!--
+            Resilience4j: the circuit breaker, and the retry and bulkhead that go around a REMOTE
+            call.
+            
+            Only this service has it, and only this service should. The other four make no outbound
+            calls at all - a circuit breaker with nothing to protect is a dependency that exists to
+            be misread later.
+
+            Note the artifact: spring-boot4, not the spring-boot3 that every example still names.
+            They are published at the same version and differ in which Spring Boot they
+            auto-configure against.
+
+            It brings resilience4j-spring6 (the AOP that makes the annotations work) and
+            resilience4j-micrometer, which is what puts resilience4j_circuitbreaker_state on
+            /actuator/prometheus without any further wiring.
+        -->
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-spring-boot4</artifactId>
+            <version>${resilience4j.version}</version>
+        </dependency>
+
+        <!--
+            AspectJ's annotation types, which Resilience4j's aspects are written with.
+            
+            Resilience4j implements @CircuitBreaker, @Retry and @Bulkhead as @Aspect classes, and
+            neither its starter nor resilience4j-spring6 pulls aspectjweaver in. Without it the
+            aspects cannot be parsed, no proxy is created, and every annotation compiles, runs and
+            does nothing at all - the same silent failure shape as @Transactional without a proxy, or
+            @Retryable without @EnableResilientMethods in Phase 6. That is the single easiest way to
+            ship a circuit breaker that is decorative.
+
+            NOT spring-boot-starter-aop, which is what every guide names: Boot 4 dropped that starter
+            entirely and the build fails with "version is missing" rather than anything mentioning
+            AOP. aspectjweaver is still managed by the Boot BOM, so no version here.
+        -->
+        <dependency>
+            <groupId>org.aspectj</groupId>
+            <artifactId>aspectjweaver</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>testcontainers-kafka</artifactId>
