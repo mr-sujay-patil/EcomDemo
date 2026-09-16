@@ -43,7 +43,7 @@ public class OrderAuditService {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public void record(OrderAudit.Outcome outcome, String detail, Long orderId) {
+    public void recordAttempt(OrderAudit.Outcome outcome, String detail, Long orderId) {
         orderAuditRepository.save(new OrderAudit(clock.instant(), outcome, truncate(detail), orderId));
     }
 

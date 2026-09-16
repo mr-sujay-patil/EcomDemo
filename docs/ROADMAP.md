@@ -58,7 +58,7 @@ flowchart LR
 | 9 | JWT authentication | Security | ✅ Complete |
 | 10 | Containerization (Docker & Compose) | Quality & Delivery | ✅ Complete |
 | 11 | CI with GitHub Actions | Quality & Delivery | ✅ Complete |
-| 12 | Code quality with SonarQube | Quality & Delivery | ⬜ |
+| 12 | Code quality with SonarQube | Quality & Delivery | ✅ Complete |
 | 13 | Redis caching | Performance | ⬜ |
 | 14 | Spring Batch | Performance | ⬜ |
 | 15 | Metrics (Actuator, Prometheus, Grafana) | Performance | ⬜ |

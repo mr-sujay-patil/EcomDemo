@@ -169,7 +169,8 @@ class CartServiceTest {
                     .willThrow(new NotFoundException("Product 9999 not found"));
 
             // WHEN / THEN
-            assertThatThrownBy(() -> cartService.addItem(CUSTOMER_ID, new AddCartItemRequest(9999L, 1)))
+            AddCartItemRequest request = new AddCartItemRequest(9999L, 1);
+            assertThatThrownBy(() -> cartService.addItem(CUSTOMER_ID, request))
                     .isInstanceOf(NotFoundException.class)
                     .hasMessage("Product 9999 not found");
         }
@@ -181,7 +182,8 @@ class CartServiceTest {
             given(productService.requireEntity(1L)).willReturn(keyboard);
 
             // WHEN / THEN
-            assertThatThrownBy(() -> cartService.addItem(CUSTOMER_ID, new AddCartItemRequest(1L, 41)))
+            AddCartItemRequest request = new AddCartItemRequest(1L, 41);
+            assertThatThrownBy(() -> cartService.addItem(CUSTOMER_ID, request))
                     .isInstanceOf(ConflictException.class)
                     .hasMessageContaining("Only 40 unit(s)")
                     .hasMessageContaining("requested 41");
@@ -197,7 +199,8 @@ class CartServiceTest {
 
             // WHEN / THEN - adding 2 more asks for 41 in total, which is one too many.
             // Checking the request in isolation would have let this through.
-            assertThatThrownBy(() -> cartService.addItem(CUSTOMER_ID, new AddCartItemRequest(1L, 2)))
+            AddCartItemRequest request = new AddCartItemRequest(1L, 2);
+            assertThatThrownBy(() -> cartService.addItem(CUSTOMER_ID, request))
                     .isInstanceOf(ConflictException.class)
                     .hasMessageContaining("requested 41");
             assertThat(cart.getItems().getFirst().getQuantity()).isEqualTo(39);
@@ -227,7 +230,8 @@ class CartServiceTest {
             cartExists();
 
             // WHEN / THEN
-            assertThatThrownBy(() -> cartService.updateItemQuantity(CUSTOMER_ID, 1L, new UpdateCartItemRequest(3)))
+            UpdateCartItemRequest request = new UpdateCartItemRequest(3);
+            assertThatThrownBy(() -> cartService.updateItemQuantity(CUSTOMER_ID, 1L, request))
                     .isInstanceOf(NotFoundException.class)
                     .hasMessage("Product 1 is not in the cart");
         }
@@ -239,7 +243,8 @@ class CartServiceTest {
             cart.addOrIncrease(keyboard, 2);
 
             // WHEN / THEN
-            assertThatThrownBy(() -> cartService.updateItemQuantity(CUSTOMER_ID, 1L, new UpdateCartItemRequest(999)))
+            UpdateCartItemRequest request = new UpdateCartItemRequest(999);
+            assertThatThrownBy(() -> cartService.updateItemQuantity(CUSTOMER_ID, 1L, request))
                     .isInstanceOf(ConflictException.class)
                     .hasMessageContaining("Only 40 unit(s)");
             assertThat(cart.getItems().getFirst().getQuantity()).isEqualTo(2);

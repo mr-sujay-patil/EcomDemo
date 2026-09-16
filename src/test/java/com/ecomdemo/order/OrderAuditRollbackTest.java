@@ -5,7 +5,6 @@ import java.util.List;
 
 import com.ecomdemo.cart.CartService;
 import com.ecomdemo.cart.dto.AddCartItemRequest;
-import com.ecomdemo.cart.dto.CartItemResponse;
 import com.ecomdemo.common.ConflictException;
 import com.ecomdemo.product.ProductService;
 import com.ecomdemo.product.dto.ProductRequest;

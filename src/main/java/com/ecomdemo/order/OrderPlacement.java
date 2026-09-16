@@ -67,7 +67,7 @@ class OrderPlacement {
         Cart cart = cartService.requireCart(customerId);
         if (cart.isEmpty()) {
             String detail = "Cannot place an order: the cart is empty";
-            orderAuditService.record(OrderAudit.Outcome.EMPTY_CART, detail, null);
+            orderAuditService.recordAttempt(OrderAudit.Outcome.EMPTY_CART, detail, null);
             throw new ConflictException(detail);
         }
 
@@ -79,7 +79,7 @@ class OrderPlacement {
             if (!product.hasStockFor(cartItem.getQuantity())) {
                 String detail = "Only " + product.getStockQuantity() + " unit(s) of '"
                         + product.getName() + "' in stock, ordered " + cartItem.getQuantity();
-                orderAuditService.record(OrderAudit.Outcome.INSUFFICIENT_STOCK, detail, null);
+                orderAuditService.recordAttempt(OrderAudit.Outcome.INSUFFICIENT_STOCK, detail, null);
                 throw new ConflictException(detail);
             }
         }
@@ -105,12 +105,12 @@ class OrderPlacement {
         try {
             orderRepository.flush();
         } catch (OptimisticLockingFailureException ex) {
-            orderAuditService.record(OrderAudit.Outcome.CONCURRENT_MODIFICATION,
+            orderAuditService.recordAttempt(OrderAudit.Outcome.CONCURRENT_MODIFICATION,
                     "Another transaction changed a product first: " + ex.getClass().getSimpleName(), null);
             throw ex;
         }
 
-        orderAuditService.record(OrderAudit.Outcome.PLACED,
+        orderAuditService.recordAttempt(OrderAudit.Outcome.PLACED,
                 "Order placed with " + saved.getItems().size() + " line(s), total " + saved.getTotalAmount(),
                 saved.getId());
 

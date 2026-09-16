@@ -200,7 +200,7 @@ class OrderPlacementTest {
             orderPlacement.placeOnce(CUSTOMER_ID);
 
             // THEN the audit names the order it describes
-            verify(orderAuditService).record(eq(OrderAudit.Outcome.PLACED), any(), eq(7L));
+            verify(orderAuditService).recordAttempt(eq(OrderAudit.Outcome.PLACED), any(), eq(7L));
         }
 
         @Test
@@ -213,7 +213,7 @@ class OrderPlacementTest {
 
             // AND the attempt is recorded even though the transaction around it will roll back -
             // which is exactly what REQUIRES_NEW on the audit service is for.
-            verify(orderAuditService).record(eq(OrderAudit.Outcome.EMPTY_CART), any(), eq(null));
+            verify(orderAuditService).recordAttempt(eq(OrderAudit.Outcome.EMPTY_CART), any(), eq(null));
         }
 
         @Test
@@ -225,7 +225,7 @@ class OrderPlacementTest {
 
             // WHEN / THEN
             assertThatThrownBy(() -> orderPlacement.placeOnce(CUSTOMER_ID)).isInstanceOf(ConflictException.class);
-            verify(orderAuditService).record(eq(OrderAudit.Outcome.INSUFFICIENT_STOCK), any(), eq(null));
+            verify(orderAuditService).recordAttempt(eq(OrderAudit.Outcome.INSUFFICIENT_STOCK), any(), eq(null));
         }
     }
 }

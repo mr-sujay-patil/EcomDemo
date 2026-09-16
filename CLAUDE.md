@@ -368,6 +368,31 @@ the values would pass either way.
 **A new test should fail before it passes.** If you cannot make it go red by breaking the code it
 claims to cover, it is not testing that code.
 
+## Code quality
+
+**Coverage comes from JaCoCo across both test phases.** `./mvnw clean verify` writes a merged report
+to `target/site/jacoco-merged/` — open `index.html`. Measuring only Surefire would ignore the
+integration tests, which cover a great deal.
+
+**Static analysis is SonarQube, run locally and on demand:**
+
+```bash
+docker compose -f compose.sonar.yaml up -d
+./mvnw clean verify                      # Sonar reads JaCoCo's report; it does not measure coverage
+./mvnw sonar:sonar -Dsonar.host.url=http://localhost:9000 -Dsonar.token=<token>
+```
+
+`sonar.qualitygate.wait=true` fails the build on a red gate. It applies only to `sonar:sonar`, so
+`verify` never needs a server.
+
+**The gate is about *new* code**, and its conditions are recorded in `docs/quality-gate.md` — the gate
+itself lives in the SonarQube instance and is lost if the volume is rebuilt.
+
+**When an issue is not a defect, resolve it in SonarQube with the evidence** — false positive or
+accepted, with a comment saying why and, for an acceptance, what would invalidate it. Do not add
+`//NOSONAR` to the code: a suppression in source rots silently and hides the reasoning from the
+person who next meets the issue.
+
 ## CI
 
 **Every pull request runs `./mvnw -B clean verify` on GitHub Actions**, and `Build and test` is a

@@ -31,17 +31,6 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 public class SecurityConfiguration {
 
     /**
-     * The one place the hashing algorithm is chosen.
-     *
-     * <p>BCrypt is deliberately slow and salts every hash, so identical passwords produce different
-     * strings and guessing is expensive per attempt rather than per billion. The work factor is
-     * encoded in the hash itself, which is what lets it be raised later without invalidating existing
-     * passwords: an old hash still verifies, and can be re-hashed on next login.
-     *
-     * <p>Returning the {@link PasswordEncoder} interface rather than the concrete class is what makes
-     * that change a one-line edit. Nothing else in the application names BCrypt.
-     */
-    /**
      * Checks an email and password. From Phase 9 this has exactly one caller - the login endpoint -
      * because no other request carries credentials; they carry a token instead.
      *
@@ -57,6 +46,17 @@ public class SecurityConfiguration {
         return new ProviderManager(provider);
     }
 
+    /**
+     * The one place the hashing algorithm is chosen.
+     *
+     * <p>BCrypt is deliberately slow and salts every hash, so identical passwords produce different
+     * strings and guessing is expensive per attempt rather than per billion. The work factor is
+     * encoded in the hash itself, which is what lets it be raised later without invalidating existing
+     * passwords: an old hash still verifies, and can be re-hashed on next login.
+     *
+     * <p>Returning the {@link PasswordEncoder} interface rather than the concrete class is what makes
+     * that change a one-line edit. Nothing else in the application names BCrypt.
+     */
     @Bean
     public PasswordEncoder passwordEncoder() {
         return new BCryptPasswordEncoder();

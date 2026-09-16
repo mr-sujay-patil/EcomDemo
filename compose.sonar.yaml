@@ -1,0 +1,84 @@
+# SonarQube Community Edition, for local analysis.
+#
+# Deliberately a separate file from compose.yaml. SonarQube is a ~1 GB Java server that exists to
+# analyse this project, not to run it - dragging it into `docker compose up` would make every
+# ordinary development session pay for a tool used occasionally.
+#
+#   docker compose -f compose.sonar.yaml up -d
+#   ./mvnw clean verify sonar:sonar
+#   docker compose -f compose.sonar.yaml down
+#
+# It needs its own database. SonarQube's embedded H2 is evaluation-only and refuses to start in
+# recent versions, so this runs a second PostgreSQL - entirely separate from the application's, with
+# its own volume. The two never meet.
+
+name: ecomdemo-sonar
+
+services:
+
+  sonar-db:
+    # PostgreSQL 16, not the 18 the application runs on.
+    #
+    # SonarQube keeps its own supported-database matrix and it lags: sonarqube:lts-community is
+    # 9.9.x, whose schema migrations fail outright on PostgreSQL 18 with "column \"uuid\" is in a
+    # primary key" - an error about SonarQube's internal schema that says nothing about versions.
+    # Pinning a major that SonarQube supports is the fix; matching the application's database version
+    # here would buy nothing, since the two never share data.
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: sonarqube
+      POSTGRES_USER: sonarqube
+      # A default here, unlike compose.yaml, and the difference is deliberate: this database holds
+      # analysis results for one developer's laptop, is never published to the host, and is deleted
+      # with the volume. The application's database password has no default because that one guards
+      # something.
+      POSTGRES_PASSWORD: ${SONAR_DB_PASSWORD:-sonarqube}
+    volumes:
+      - sonar-db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonarqube -d sonarqube"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  sonarqube:
+    # Current Community Edition rather than the lts-community tag. That tag still points at the 9.9
+    # line, which is old enough to be the reason for the PostgreSQL pin above.
+    image: sonarqube:community
+    depends_on:
+      sonar-db:
+        condition: service_healthy
+    environment:
+      # sonar-db, not localhost - the same container-networking rule as the application.
+      SONAR_JDBC_URL: jdbc:postgresql://sonar-db:5432/sonarqube
+      SONAR_JDBC_USERNAME: sonarqube
+      SONAR_JDBC_PASSWORD: ${SONAR_DB_PASSWORD:-sonarqube}
+    ports:
+      - "9000:9000"
+    volumes:
+      # data holds the analysis history and the Elasticsearch index; extensions holds plugins; logs
+      # is where to look when it will not start. All named, so a `down` does not discard the history.
+      - sonar-data:/opt/sonarqube/data
+      - sonar-extensions:/opt/sonarqube/extensions
+      - sonar-logs:/opt/sonarqube/logs
+    ulimits:
+      # SonarQube embeds Elasticsearch, which refuses to start with the default file-descriptor
+      # limit and says so in a message that mentions neither SonarQube nor Docker.
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      # /api/system/status returns UP only once the web server, the compute engine and the embedded
+      # Elasticsearch are all ready - which takes noticeably longer than the port opening.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9000/api/system/status | grep -q '\"status\":\"UP\"' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
+
+volumes:
+  sonar-db-data:
+  sonar-data:
+  sonar-extensions:
+  sonar-logs:

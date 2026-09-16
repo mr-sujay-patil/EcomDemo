@@ -73,12 +73,12 @@ class TokenServiceTest {
 
         // THEN the subject is the customer id - what every controller and query actually needs, and
         // the one thing about a user that never changes
-        assertThat(payload).contains("\"sub\":\"42\"");
-        assertThat(payload).contains("\"email\":\"sam@example.com\"");
-
-        // AND the authorization decision travels in the token, which is what lets a request be
-        // authorized with no database read at all
-        assertThat(payload).contains("\"role\":\"CUSTOMER\"");
+        // The role is in there too: the authorization decision travels in the token, which is what
+        // lets a request be authorized with no database read at all.
+        assertThat(payload)
+                .contains("\"sub\":\"42\"")
+                .contains("\"email\":\"sam@example.com\"")
+                .contains("\"role\":\"CUSTOMER\"");
     }
 
     @Test
@@ -88,8 +88,9 @@ class TokenServiceTest {
         String payload = payloadOf(tokenService.issue(shopper()));
 
         // THEN exp is iat + 15 minutes, in epoch seconds
-        assertThat(payload).contains("\"iat\":" + NOW.getEpochSecond());
-        assertThat(payload).contains("\"exp\":" + NOW.plus(Duration.ofMinutes(15)).getEpochSecond());
+        assertThat(payload)
+                .contains("\"iat\":" + NOW.getEpochSecond())
+                .contains("\"exp\":" + NOW.plus(Duration.ofMinutes(15)).getEpochSecond());
     }
 
     @Test

@@ -47,6 +47,16 @@ public class JwtConfiguration {
     /** HS256 requires a key of at least 256 bits; a shorter one is rejected outright by Nimbus. */
     private static final int MINIMUM_KEY_BYTES = 32;
 
+    /**
+     * Held once rather than constructed per call.
+     *
+     * <p>A {@link SecureRandom} seeds itself from the operating system on construction, which is the
+     * expensive part, and instances are thread-safe and designed to be shared. Creating a new one for
+     * each use pays that cost repeatedly and, on some platforms, can block waiting for entropy.
+     * Flagged by SonarQube as java:S2119.
+     */
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+
     private final SecretKey signingKey;
 
     public JwtConfiguration(@Value("${ecomdemo.jwt.secret:}") String configuredSecret) {
@@ -67,7 +77,7 @@ public class JwtConfiguration {
 
     private static SecretKey generateEphemeralKey() {
         byte[] key = new byte[MINIMUM_KEY_BYTES];
-        new SecureRandom().nextBytes(key);
+        SECURE_RANDOM.nextBytes(key);
         log.warn("JWT_SECRET is not set - generated an ephemeral signing key. Tokens will stop "
                 + "working when this application restarts, and other instances will reject them. "
                 + "Set JWT_SECRET for anything beyond a single local process.");

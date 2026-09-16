@@ -786,3 +786,81 @@ worse than five that get looked at.
   continuous delivery and continuous deployment.
 - No cache for the Testcontainers PostgreSQL image, so every run pulls it.
 - No release/tag-triggered workflow, so there are no semantic version tags on images yet.
+
+---
+
+## Phase 12 — Code Quality
+
+**JaCoCo instruments both test phases, and the reports are merged.** Phase 7 split unit tests
+(Surefire) from integration tests (Failsafe), so a single agent would have measured half the suite.
+The 28 integration tests drive real HTTP through the security filter chain and Flyway; a coverage
+figure that ignored them would have understated the truth badly enough to create pressure to write
+redundant unit tests for code the integration tests already prove. The merge has to happen at
+`post-integration-test`, because the agent only flushes its data when its JVM exits.
+
+**Neither plugin is managed by the Spring Boot parent.** Verified against the 380 KB effective POM
+rather than assumed, so both carry explicit versions. JaCoCo must be at least 0.8.11 to read Java 21
+class files.
+
+**`sonar.qualitygate.wait=true`.** The scanner polls after uploading and fails the build on a red
+gate. A gate that cannot fail anything is a dashboard, and dashboards get ignored the first time they
+go red. It applies only to `sonar:sonar`, so an ordinary `./mvnw verify` still needs no server - the
+same reasoning as keeping SonarQube in its own compose file.
+
+**SonarQube's `lts-community` tag does not work with PostgreSQL 18.** That tag still points at the
+9.9 line, whose own schema migration fails with `column "uuid" is in a primary key` - an error about
+SonarQube's internal schema that mentions neither version. `compose.sonar.yaml` therefore runs
+current Community Edition against PostgreSQL 16. Matching the application's PostgreSQL 18 would buy
+nothing: the two databases never share data, and SonarQube keeps its own supported-version matrix,
+which lags.
+
+**The first analysis passed the gate without evaluating anything.** Every condition on this gate is a
+"new code" condition, and on a first analysis there is no baseline, so there is no new code and the
+gate reported OK having measured nothing. It is a genuinely misleading green: the second analysis,
+with the first as its baseline, failed on `new_violations: 1`. Worth remembering before trusting a
+gate on a project's first run - and a good argument for why new-code conditions need a project with
+history behind them.
+
+**Thirteen "critical bugs" were a false positive, and were proven so rather than assumed.**
+`java:S5845` flags `assertThat(x).isEqualTo(2)` inside `MockMvcTester.hasPathSatisfying`, because
+statically it sees an `Object` compared with an `int`. AssertJ's `AssertProvider` overload resolves
+to a JSON-value assert instead. Rather than trust the tool or my own reading, I changed an expected
+value and ran the test: it failed with `expected: 999 but was: 2`, so the assertion was live. They
+are marked false positive **in SonarQube with that evidence in the comment**, not suppressed with
+`//NOSONAR` in the code - the reasoning belongs where the next person meets the issue, and code
+comments suppressing a scanner rot silently.
+
+**The CSRF vulnerability is accepted, not fixed, and the acceptance has an expiry condition.** The
+justification from Phase 8 is recorded on the issue: CSRF defends against a credential the browser
+attaches automatically, this API issues no session and no cookie, and from Phase 9 credentials arrive
+as a Bearer token a client sets deliberately. The comment also states what would invalidate the
+acceptance - storing a token in a cookie - so a future reader knows when to reopen it rather than
+inheriting a permanent "accepted" with no reasoning.
+
+**Sonar found two documentation bugs no test could.** Two Javadoc blocks stacked on one method in
+`CartService` and `SecurityConfiguration`, both left by my own script-driven edits in earlier phases.
+The second was the interesting one: a Phase 9 edit inserted `authenticationManager` between the
+`passwordEncoder` Javadoc and its method, so one method documented the other and one had none. This
+is the case for static analysis in a sentence - it reads what the tests cannot.
+
+**What was fixed versus what was left.** Everything objectively wrong was fixed: the shared
+`SecureRandom`, the impossible `throws Exception`, the method named `record`, seven ambiguous
+`assertThatThrownBy` lambdas, unused imports, and assertion chaining. Nothing was suppressed to make
+a number move.
+
+### Cloud analysis, and why it is not here
+
+SonarQube Cloud is free for public repositories and would give PR decoration - quality feedback as
+comments on the pull request, which is where it is most useful. Wiring it in needs a SonarCloud
+organisation, a project binding, a `SONAR_TOKEN` repository secret, and a step in `ci.yml` running
+the scanner with `-Dsonar.host.url=https://sonarcloud.io`. All of that is set up outside this
+repository, so a workflow committed now would sit broken until it was done. Local analysis is what
+this phase can demonstrate end to end.
+
+### Known gaps, deferred on purpose
+
+- Analysis is a local command nobody is forced to run; CI does not gate on it.
+- Branch coverage is 63.3% against 94.5% line coverage, and no gate condition watches it.
+- New-code conditions need history to mean anything, which a first analysis does not have.
+- The quality gate lives in the SonarQube instance, not in the repository. Rebuilding the volume
+  loses it; `docs/quality-gate.md` records the conditions so it can be recreated.
