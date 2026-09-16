@@ -1,6 +1,10 @@
 package com.ecomdemo.order;
 
 import java.math.BigDecimal;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
@@ -26,10 +30,28 @@ import org.springframework.stereotype.Component;
  * work, but it hashes the name and tags on every call. Resolving them once in the constructor is the
  * documented pattern and makes the cost of instrumentation a field read.
  *
- * <p>The exception is {@link #recordCheckout}, which resolves its timer per call. That one carries an
- * {@code outcome} tag, and a tag whose value varies is a different meter per value - so it cannot be
- * a single field. The set of values is closed and tiny ({@code success}, {@code conflict},
- * {@code error}), which is what makes it safe: <strong>every distinct tag value is a separate time
+ * <p>The checkout timer is tagged, and a tag whose value varies is a different meter per value - so
+ * it is a {@code Map} of one timer per outcome rather than a single field. All three are built here,
+ * at startup, for a reason worth understanding.
+ *
+ * <h2>Why every series is registered before it is needed</h2>
+ *
+ * Micrometer creates a meter on first use, so a lazily registered timer produces <em>no time series
+ * at all</em> until the first event. Prometheus then sees that series appear with a value already
+ * above zero, and {@code rate()} - which measures the increase between samples - has nothing to
+ * compare against and reports <strong>zero</strong> for the whole first window. The graph stays flat
+ * over exactly the events that should have made it move.
+ *
+ * <p>It is also the difference between "no conflicts happened" and "the conflict series does not
+ * exist", which are the same picture on a dashboard and very different facts during an incident.
+ * Registering all three up front means each starts at 0 and counts honestly from the first event.
+ *
+ * <p>This was measured, not reasoned about: {@code orders_placed_total} had samples running 0 -> 12
+ * and rated correctly, while {@code order_checkout_seconds_count} first appeared already at 12 and
+ * rated to nothing.
+ *
+ * <p>Pre-registering is only possible because the tag's values are a closed, tiny set. That is the
+ * same property that makes the tag safe at all: <strong>every distinct tag value is a separate time
  * series</strong>, and putting something unbounded there - a customer id, an order id - is the
  * fastest way to bring down a Prometheus.
  */
@@ -52,6 +74,9 @@ public class OrderMetrics {
     private final MeterRegistry registry;
     private final Counter ordersPlaced;
     private final DistributionSummary orderValue;
+
+    /** One timer per outcome, all registered at startup - see the class javadoc. */
+    private final Map<String, Timer> checkoutTimers;
 
     OrderMetrics(MeterRegistry registry) {
         this.registry = registry;
@@ -87,6 +112,14 @@ public class OrderMetrics {
                 .minimumExpectedValue(1.0)
                 .maximumExpectedValue(5000.0)
                 .register(registry);
+
+        this.checkoutTimers = Stream.of(OUTCOME_SUCCESS, OUTCOME_CONFLICT, OUTCOME_ERROR)
+                .collect(Collectors.toUnmodifiableMap(Function.identity(), outcome ->
+                        Timer.builder(CHECKOUT)
+                                .description("Duration of one checkout attempt")
+                                .tag("outcome", outcome)
+                                .publishPercentileHistogram()
+                                .register(registry)));
     }
 
     /**
@@ -111,10 +144,14 @@ public class OrderMetrics {
      * {@code POST /api/orders}, which spans every retry.
      */
     void recordCheckout(Timer.Sample sample, String outcome) {
-        sample.stop(Timer.builder(CHECKOUT)
-                .description("Duration of one checkout attempt")
-                .tag("outcome", outcome)
-                .register(registry));
+        Timer timer = checkoutTimers.get(outcome);
+        if (timer == null) {
+            // Unreachable from this package, and deliberately loud if it ever stops being so: a new
+            // outcome added without registering it here would otherwise reintroduce exactly the
+            // lazily-created series this class exists to avoid.
+            throw new IllegalArgumentException("Unknown checkout outcome: " + outcome);
+        }
+        sample.stop(timer);
     }
 
     /**

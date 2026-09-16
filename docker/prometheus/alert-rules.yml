@@ -15,8 +15,14 @@ groups:
         #
         # When no requests are arriving the denominator is zero, the expression is NaN, and the
         # comparison is false. A quiet service is not a broken one.
+        #
+        # `or vector(0)` matters more than it looks. With no 5xx at all there is no SERVER_ERROR
+        # series, and a division whose numerator is a missing series returns no result - not zero.
+        # The alert is correct either way (no result cannot exceed 0.05), but the identical
+        # expression on the dashboard would read "No data" on a perfectly healthy service, which is
+        # the kind of panel people learn to ignore.
         expr: >
-          sum(rate(http_server_requests_seconds_count{outcome="SERVER_ERROR"}[5m]))
+          (sum(rate(http_server_requests_seconds_count{outcome="SERVER_ERROR"}[5m])) or vector(0))
           /
           sum(rate(http_server_requests_seconds_count[5m]))
           > 0.05

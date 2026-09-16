@@ -90,7 +90,7 @@
     {
       "type": "stat",
       "title": "Error rate (5xx)",
-      "description": "E in RED, and the expression the HighServerErrorRate alert fires on. Red above 5%.",
+      "description": "E in RED, and the same expression the HighServerErrorRate alert fires on. `or vector(0)` is what makes a healthy service read 0% instead of 'No data': with no 5xx there is no SERVER_ERROR series at all, and a division by a missing series returns nothing rather than zero. Red above 5%.",
       "id": 3,
       "datasource": {
         "type": "prometheus",
@@ -148,7 +148,7 @@
             "type": "prometheus",
             "uid": "ecomdemo-prometheus"
           },
-          "expr": "sum(rate(http_server_requests_seconds_count{application=\"ecomdemo\",outcome=\"SERVER_ERROR\"}[$__rate_interval])) / sum(rate(http_server_requests_seconds_count{application=\"ecomdemo\"}[$__rate_interval]))"
+          "expr": "(sum(rate(http_server_requests_seconds_count{application=\"ecomdemo\",outcome=\"SERVER_ERROR\"}[$__rate_interval])) or vector(0)) / sum(rate(http_server_requests_seconds_count{application=\"ecomdemo\"}[$__rate_interval]))"
         }
       ]
     },
