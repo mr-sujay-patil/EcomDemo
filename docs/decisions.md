@@ -1330,9 +1330,16 @@ the scheduling enough to expose it.
 
 It was bisected rather than guessed: `main` green 5/5, `main` plus the Kafka dependency 4/4, this
 branch ~3/5 — and still red with the new IT excluded and event publishing disabled, which ruled out
-the new code and left the timing. The tests now wait up to two seconds. That is the honest assertion
-rather than a weakened one: what they exist to prove is that a write path *evicts* rather than leaving
-the entry to expire, and the TTLs are minutes.
+the new code and left the timing.
+
+It also bites in *setup*, not only in assertions: a later run failed on a precondition that read an
+entry straight after the `findById` which should have cached it. A setup step that fails
+intermittently is worse than an assertion that does, because it reads as the behaviour under test
+being broken. Every read of the cache in that class now waits up to two seconds — three orders of
+magnitude more than the write takes, three fewer than the TTL. That is the honest assertion rather
+than a weakened one: what these tests exist to prove is that a read is served from Redis and that a
+write path *evicts* rather than leaving the entry to expire, and a two-second window separates
+"evicted" from "expired" just as decisively as an immediate read would.
 
 ### Known gaps, deferred on purpose
 
@@ -1348,5 +1355,8 @@ the entry to expire, and the TTLs are minutes.
   scheduler this phase does not introduce.
 - No consumer-lag alerting in the Phase 15 Grafana dashboard, which is the first thing a real
   deployment would add.
+- **Whether `RedisCache` should await its own write** is a Phase 13 question this phase only
+  surfaced. The tests now describe the behaviour honestly; making the cache synchronous, or deciding
+  it should not be, is work for a phase that owns caching.
 - PLAINTEXT with no authentication, on the compose network only. TLS and SASL are what a real broker
   needs.
