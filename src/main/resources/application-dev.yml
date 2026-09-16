@@ -22,11 +22,15 @@ spring:
 
   jpa:
     hibernate:
-      ddl-auto: update             # Hibernate adds missing tables and columns but never drops data.
-                                   # Phase 5 replaces this with Flyway: `update` cannot rename,
-                                   # cannot drop, and never tells you what it changed.
+      # Flyway owns the schema from Phase 5 on. `validate` makes Hibernate compare the @Entity
+      # mappings against the tables Flyway built and refuse to start if they disagree - so a mapping
+      # added without a migration fails immediately and loudly, rather than at the first query.
+      #
+      # It replaces `update`, which silently did whatever it thought best: it can add a column but
+      # never rename or drop one, it reports nothing it did, and it will happily diverge from what
+      # the next environment has.
+      ddl-auto: validate
 
-  sql:
-    init:
-      mode: never                  # data.sql would re-insert the whole catalogue on EVERY restart
-                                   # against a persistent database. The README seeds it once by hand.
+  # No spring.sql.init here any more: data.sql is gone and V2__seed_products.sql took its place.
+  # Flyway records that it ran, so the catalogue is seeded exactly once per database instead of
+  # needing to be switched off to avoid duplicating itself on every restart.

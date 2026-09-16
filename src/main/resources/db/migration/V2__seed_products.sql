@@ -1,8 +1,8 @@
--- Seed data for the in-memory database.
+-- Replaces data.sql, which Spring ran on every start.
 --
--- Hibernate creates the schema from the @Entity classes (ddl-auto: create-drop) and, because
--- spring.jpa.defer-datasource-initialization is true, this script runs afterwards. It re-runs on
--- every start, which is fine: the database is thrown away when the JVM stops.
+-- As a migration this runs exactly once per database and is recorded in flyway_schema_history, which
+-- is what makes it safe against a database that survives a restart. Phase 4 had to disable data.sql
+-- in dev for precisely that reason: re-running it added another ten products on every boot.
 
 INSERT INTO products (name, description, price, stock_quantity) VALUES
     ('Mechanical Keyboard',   'Hot-swappable 75% keyboard with tactile brown switches', 129.99, 40),
@@ -16,6 +16,6 @@ INSERT INTO products (name, description, price, stock_quantity) VALUES
     ('1TB Portable SSD',      'USB 3.2 Gen 2, up to 1050 MB/s read',                    149.99, 50),
     ('Cable Management Kit',  'Sleeves, clips and velcro ties for a tidy desk',          24.99, 300);
 
--- The single shared cart of this phase. No users exist yet, so there is exactly one cart row and
--- its id is fixed (Cart.SHARED_CART_ID).
+-- The single shared cart. CartService.requireCart() recreates this row if it is missing, so the
+-- application survives without it - but seeding it here keeps the first request from doing a write.
 INSERT INTO carts (id) VALUES (1);
