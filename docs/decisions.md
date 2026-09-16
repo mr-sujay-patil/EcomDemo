@@ -1360,3 +1360,289 @@ write path *evicts* rather than leaving the entry to expire, and a two-second wi
   it should not be, is work for a phase that owns caching.
 - PLAINTEXT with no authentication, on the compose network only. TLS and SASL are what a real broker
   needs.
+
+---
+
+## Phase 20 — Microservices Split
+
+### The shape of the split
+
+Five services, chosen from the feature packages the monolith already had: `customer-service`
+(accounts and the signing key), `catalog-service` (products and the cache), `inventory-service`
+(stock), `order-service` (carts, orders, the audit trail) and `notification-service` (the Kafka
+consumer).
+
+Four of the five are leaves — they make no outbound calls at all. Only order-service orchestrates,
+and that asymmetry is worth reading off the code rather than assuming: a checkout cannot succeed
+unless catalog-service and inventory-service are both up, so order-service's availability is the
+product of theirs. Three services at 99.9% give roughly 99.7% between them. Everything about that
+package — the timeouts, the compensating release, the decision to publish an event rather than call
+notification-service — is an attempt to keep that number from getting smaller.
+
+### Why stock was the boundary worth drawing
+
+The most useful thing this phase did was separate `products.price` from `products.stock_quantity`,
+and the argument is entirely about how the two are read and written.
+
+Price and description are written a handful of times a year and read on every page load, so they
+belong in a cache. Stock is written by every checkout and must never be served from a cache, because
+two shoppers given the same remembered number both pass the "is there enough?" check and the last
+unit is sold twice. Phase 13 managed both on one row by carving out `ProductService.requireEntity` as
+the one lookup that must not be annotated — a rule that worked and depended on nobody forgetting it.
+
+With the fields in separate services that stops being a matter of care. catalog-service caches
+everything it serves because nothing it serves feeds a decision; inventory-service has no Redis
+dependency at all, so the rule cannot be broken there by adding an annotation. The same split also
+deleted `evictFromCache`, the awkward coupling Phase 13 accepted where the order feature had to know
+the catalogue was cached.
+
+### Database per service: five databases, one server
+
+`docker/postgres/init-databases.sh` creates `ecomdemo_customer`, `ecomdemo_catalog`,
+`ecomdemo_inventory`, `ecomdemo_order` and `ecomdemo_notification` on first start.
+
+Five containers would have been the more orthodox demonstration. The boundary they enforce is
+identical: PostgreSQL has no cross-database joins and no cross-database foreign keys, so
+`SELECT ... FROM products` inside `ecomdemo_order` fails with *relation "products" does not exist* —
+the constraint is in the engine rather than in code review. What five containers would additionally
+buy is independent failure, and losing that is worth stating plainly: this postgres container going
+down takes all five services with it. On a 3.8 GB Docker VM already running six JVMs, that was the
+right trade for a learning stack whose subject is the code boundary.
+
+Four cross-feature foreign keys disappeared with the split: `cart_items.product_id`,
+`order_items.product_id`, `carts.customer_id` and `orders.customer_id`. The columns remain; only the
+guarantee has gone. The schema can now hold a cart line for a deleted product, or an order belonging
+to a customer id that no longer exists — and the second of those is *correct*, because an order is a
+historical record that must outlive the account. `MigrationLayoutTest` checks what no service's own
+suite can: that each timeline starts at V1, that no table is created by two services, and that no
+migration references a table in another database.
+
+### What is shared, and what is deliberately not
+
+`shared-kernel` holds infrastructure: the `{status, message}` error shape, the JWT filter chain, the
+clock, the common metric tag. If any of those changed, every service would want the change, and a
+service that disagreed would be a bug.
+
+It holds **no DTOs and no event records**, and that is the decision this phase turns on. Putting
+`ProductResponse` or `OrderPlacedEvent` in there would look tidier and would quietly rebuild the
+monolith: one record changes, five services must be recompiled and redeployed together, and the
+independent deployability the split exists for is gone. So catalog-service's `ProductResponse` has
+five fields and order-service's `CatalogProduct` has three; order-service and notification-service
+each declare their own `OrderPlacedEvent`.
+
+They are kept in step by convention and by tests, not by a compiler:
+`OrderPlacedEventContractTest` asserts the JSON field *names* the producer emits, and
+notification-service's integration test publishes a hand-written golden sample with exactly those
+names. Consumer-driven contract testing without the framework — cheap, and honest about being two
+assertions a human has to keep in agreement. The reader is tolerant
+(`@JsonIgnoreProperties(ignoreUnknown = true)`), so additive changes are safe in either deployment
+order; a rename is two deploys, which is Phase 5's expand-then-contract applied to a message.
+
+The beans arrive through `@AutoConfiguration` and an `AutoConfiguration.imports` file rather than by
+widening each service's component scan. Scanning a package you do not own makes the library's package
+layout part of its contract — move a class and five services break at startup with no compile error.
+
+### RS256, because Phase 9 said so
+
+`JwtConfiguration` in Phase 9 carried this sentence: *"With HMAC, anyone who can verify can also
+forge, so every service that checks a token must hold the key that creates them — which is why a
+shared HMAC secret stops scaling the moment the monolith splits (Phase 20)."*
+
+Shipping `JWT_SECRET` to five services would have given notification-service — whose entire job is
+writing a row when an event arrives — everything needed to mint itself an `ADMIN` token for any
+customer. A compromise of the least important service would have been a compromise of the system.
+
+customer-service holds an RSA private key and publishes the public half at `/.well-known/jwks.json`,
+anonymously, because a public key's purpose is to be given away and requiring a credential to fetch
+the key that validates credentials is circular. The other four fetch it once, lazily, and cache it —
+so login is a hard dependency on customer-service and every subsequent request is a dependency on
+nothing. That asymmetry is the most valuable property in the design.
+
+`JwkSetContractIT` proves it from the outside: it fetches the JWK set over HTTP, builds a decoder
+from the JSON exactly as another service would, verifies a real login token with it, and asserts the
+published key contains none of the private RSA parameters.
+
+### Identity is forwarded, not re-established
+
+order-service calls inventory-service with the *shopper's own token* rather than a service
+credential. inventory-service therefore authorizes the person on whose behalf the work is happening
+and knows their id, rather than authorizing a machine.
+
+Two benefits: identity survives the hop, so every service logs the same customer id; and
+order-service is not privileged — it can do exactly what its callers could do and no more, so
+compromising it grants an attacker nothing they did not already have. The cost, stated plainly: those
+reservation endpoints are reachable by any shopper holding a valid token. The gateway in Phase 21 is
+what stops external traffic reaching internal endpoints, and that is a better answer than a shared
+secret that has to be distributed, rotated and kept out of logs.
+
+### Checkout, and the hole no transaction can cover
+
+Checkout is four steps now, two of them in other processes: read the cart (local), price it
+(catalog-service), reserve stock (inventory-service), save the order and clear the cart (local
+transaction). `@Transactional` covers the fourth and can never cover the third — a transaction
+belongs to one connection to one database, and there is no connection here that reaches both.
+
+Reserve *before* saving, not after. Both orderings can fail; this one fails in the direction that
+does not oversell. Saving first would mean an order that exists for stock nobody has — a customer who
+has been told they bought something, which is far worse to unwind.
+
+When the local write fails after the reservation succeeded, `OrderPlacement` calls
+`InventoryClient.release` in a catch block. **That is a compensation, not a rollback**, and the
+difference is not pedantic: a rollback is guaranteed by the database and invisible; this is an HTTP
+call that can itself fail, and inventory-service really did reduce the number and really did put it
+back. If the process is killed between the two steps, no compensation happens at all, because nothing
+on disk remembers a reservation was owed. `OrderPlacementTest.TheGapNoTransactionCovers` asserts the
+behaviour including the case where the compensation itself fails, rather than pretending it is
+handled. The durable version — a reservation with a state machine and a timeout, so an unconfirmed
+one expires on its own — is Phase 24.
+
+`OrderPlacement` also opens no transaction of its own, which is a change from Phase 6. It makes two
+network calls, and holding a pooled connection across somebody else's latency is a reliable way to
+exhaust the pool. The transaction starts afterwards, in `OrderWriter` — a *separate bean*, because a
+`this.saveOrder(...)` call would bypass the proxy and run untransacted, silently. That is the third
+time the self-invocation rule has shaped this feature.
+
+### Six things only running it revealed
+
+Every one of these passed `./mvnw clean verify`.
+
+1. **The HTTP interface methods had no `@PathVariable`.** An HTTP service interface resolves nothing
+   by convention; the proxy builds fine and fails at *call* time with "Could not resolve parameter
+   [0] … No suitable resolver". Every test mocked `CatalogClient` at the interface, so nothing ever
+   asked Spring to implement it. The first add-to-cart against the running stack returned a 500.
+   `ServiceClientsTest` now builds the real proxies against `MockRestServiceServer`.
+
+2. **Token propagation silently sent no header.** `UsernamePasswordAuthenticationToken` overrides
+   `eraseCredentials()` to null its credentials field, and `ProviderManager` calls that on every
+   successful authentication — so the `Jwt` the converter attached was destroyed microseconds later.
+   catalog-service still worked, because its reads are public; inventory-service answered 401 on
+   every checkout. The symptom was "reserving stock is broken" and the cause was a security feature
+   doing its job on the wrong kind of secret. Erasing a password protects the user; erasing a bearer
+   token the client already holds protects nobody and makes delegation impossible.
+   `SecurityUserAuthentication` keeps it and explains why.
+
+3. **A pure consumer needed a producer serializer.** `@RetryableTopic` republishes failed records, and
+   a record that failed to *deserialize* is forwarded as `byte[]`, which Boot's default
+   `StringSerializer` refuses. The recoverer then fails, so the record is never recovered, so it sits
+   at the head of its partition forever — the exact head-of-line blocking `@RetryableTopic` exists to
+   prevent, reintroduced three layers away by a serializer default. Every integration test in
+   notification-service timed out at once, including the ones with nothing to do with poison messages.
+
+4. **Checkout created a cart inside a read-only transaction.** With `OrderPlacement` no longer
+   transactional, `CartService.requireCart` reached `save()` inside the class-level
+   `readOnly = true`, which PostgreSQL rejects. The fix is better than the bug: checkout reads the
+   cart without creating one, so a failed order leaves no row behind — the same rule `GET /api/cart`
+   has followed since Phase 8.
+
+5. **Six JVMs over-committed a 3.8 GB Docker VM.** The first limits totalled 3.4 GB before postgres,
+   redis and Docker's own overhead. The stack came up healthy and fell over on the first real
+   request: the broker could not answer its own 2-second heartbeat, fenced itself, and the CPU storm
+   pushed catalog-service past order-service's 5-second read timeout — a checkout failing with "Read
+   timed out" pointing at a service that was perfectly fine. Phase 17 learned this with four JVMs; six
+   is where it stops being a warning.
+
+6. **`start_period` was tuned for one service, not five.** `docker compose up` starts five cold JVMs
+   at once, and catalog-service was measured taking **195 seconds** to print "Started". With a 60s
+   grace window and five 10s retries, compose declared it unhealthy at 110s and aborted the entire
+   `up` with "dependency failed to start" — for a service that was working perfectly and had simply
+   not finished. A `start_period` delays nothing when startup is fast; setting it tightly costs a
+   great deal and setting it generously costs nothing.
+
+### depends_on: started, not healthy
+
+order-service waits for postgres and kafka to be *healthy* and for catalog-service and
+inventory-service merely to have *started*. The instinct is to wait for all four, since checkout
+cannot price a cart without the catalogue.
+
+But `depends_on` only orders startup and does nothing at runtime: if catalog-service falls over an
+hour later, order-service keeps running and checkouts fail with a 409 that says so. The runtime
+dependency is handled in code — timeouts, translated errors, the compensating release — and that
+handling is what matters. Waiting for `healthy` buys only that the *first* checkout after `up` cannot
+fail, and costs a serialised startup that aborts entirely if one service is slow. Depending on
+`started` is the honest expression of a design built to tolerate absent neighbours.
+
+### What the test suite stopped being able to say
+
+Worth recording, because it is a real loss rather than a reorganisation.
+
+`SecurityRulesTest` is gone — it asserted rules across every endpoint in one slice, and the endpoints
+are in five processes now. Each service tests its own rules, and no single module can fail because
+two services disagreed about what a token means. `CartServiceTest` lost four stock assertions,
+because adding to a cart no longer consults stock; the rule moved to inventory-service and the moment
+a shopper finds out moved to checkout. `ProductCacheIT` lost its `StockIsNeverServedStale` group
+entirely.
+
+The gap is covered three ways and none of them is as good as one green build: contract tests on both
+sides of each seam, per-service integration tests against real PostgreSQL, and the end-to-end run
+through Compose. A reader should treat "all six modules are green" as necessary and not sufficient.
+
+### Known gaps, deferred on purpose
+
+- **No transaction across services, and the compensation is best-effort.** Saga, **Phase 24**.
+- **Timeouts and nothing else.** No circuit breaker, no bulkhead, no fallback — a neighbour that is
+  merely slow will hold order-service's threads until it has none left. **Phase 22**.
+- **A request cannot be followed across services.** No correlation id, no trace. **Phase 23**, and
+  **Phase 16** for the logs.
+- **Five published ports.** One entry point, CORS and rate limiting are **Phase 21**. That phase is
+  additionally blocked: no GA Spring Cloud release train targets Spring Boot 4.1 — 2025.1.3 builds
+  against 4.0.8 — and `RedisRateLimiter` exists only in the WebFlux gateway, not the servlet one.
+- **The dual write survived the split and got worse.** order-service commits the order and then
+  publishes; a crash between the two loses the notification, and there are now three things that can
+  fail independently rather than two. **Phase 18**.
+- **No batch import, no sales report.** **Phase 14**, skipped.
+- **The boundaries were never rehearsed.** **Phase 19** exists to enforce module boundaries inside one
+  deployable before they become network calls; this split was derived from the feature packages
+  instead, and nothing verified them first.
+- **catalog-service fetches the whole catalogue** when order-service asks for prices, because there is
+  no batch endpoint. Fine for ten products, wrong for ten thousand — and the fix belongs there, not
+  in a loop here.
+- **No service discovery.** Compose DNS resolves a service name to a container, which is the same job
+  at this scale and stops being enough the moment there is more than one instance to choose between.
+- **Two seed files must agree by hand.** catalog-service's V2 creates products 1–10 and
+  inventory-service's V2 creates stock for the same ids, with nothing enforcing it. That chore is
+  what database-per-service costs, and it is worth feeling at ten rows.
+
+---
+
+## Phase 21 — API Gateway: blocked, not skipped
+
+Recorded here rather than left as a gap in the tracker, because the reason is a hard external
+constraint rather than a choice, and it will need re-checking rather than re-deciding.
+
+**No GA Spring Cloud release train targets Spring Boot 4.1.** Checked against Maven Central rather
+than recalled:
+
+```
+spring-cloud-dependencies   latest GA = 2025.1.3  (released 2026-08-20)
+  └─ spring-cloud-build 5.0.3  →  <spring-boot.version>4.0.8</spring-boot.version>
+
+spring-cloud-gateway-server-webmvc 5.0.3 declares:
+    spring-boot-starter-web         4.0.8
+    spring-boot-restclient          4.0.8
+    spring-boot-starter-validation  4.0.8
+```
+
+This project is on Boot **4.1.1**. The milestone repository has nothing newer than `2025.0.0-RC1`, so
+there is not yet a preview of a 4.1-aligned train to wait for either.
+
+That combination is not merely untested. Spring Boot 4 splits auto-configuration into
+per-technology modules — the thing CLAUDE.md already warns about — and those modules are exactly what
+moves between Boot minors. Gateway's `@AutoConfiguration` classes bind against Boot 4.0 internals and
+would be loaded against 4.1.1 jars, because `spring-boot-starter-parent` manages the versions. It
+might start; if it does not, the failure is a `NoSuchMethodError` deep inside somebody else's
+auto-configuration.
+
+A second, smaller finding, from unzipping both jars: **`RedisRateLimiter` exists only in the WebFlux
+gateway**, not the servlet one, which ships Bucket4j-based rate limiting instead. So the phase as
+specified — "rate limiting with the Redis-based request rate limiter" — additionally pins the gateway
+to a reactive runtime alongside four servlet services. Defensible for a gateway, which is mostly I/O
+wait, but a consequence to choose rather than discover.
+
+The rejected alternative was downgrading the project to Boot 4.0.8, which would touch all twenty
+completed phases — Kafka, Redis 4, Testcontainers 2, the auto-config split — to unblock one. That is
+precisely the silent downgrade the project's own rules forbid.
+
+**What to do when revisiting:** check for a Spring Cloud train built against Boot 4.1 before anything
+else. If one exists, the phase is ordinary work. If not, the least-bad option is pinning the gateway
+module alone to the Boot version its train supports — legitimate in a multi-module build, since
+services are separate processes, at the cost of two Boot versions in one repository.
