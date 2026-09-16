@@ -11,6 +11,15 @@ spring:
     username: sa
     password: ""
 
+  # No cache in the fast suite.
+  #
+  # Unit and slice tests are about behaviour, not about caching, and requiring a Redis for them would
+  # undo Phase 7's rule that `./mvnw test` needs no Docker. NoOpCacheManager means every @Cacheable
+  # method simply runs - which is also the honest way to test the logic underneath a cache.
+  # ProductCacheIT turns caching back on against a real Redis container.
+  cache:
+    type: none
+
   jpa:
     hibernate:
       # The same validate as dev, against a schema the same migrations built. The test suite now

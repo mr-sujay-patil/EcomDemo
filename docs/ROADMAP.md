@@ -59,7 +59,7 @@ flowchart LR
 | 10 | Containerization (Docker & Compose) | Quality & Delivery | ✅ Complete |
 | 11 | CI with GitHub Actions | Quality & Delivery | ✅ Complete |
 | 12 | Code quality with SonarQube | Quality & Delivery | ✅ Complete |
-| 13 | Redis caching | Performance | ⬜ |
+| 13 | Redis caching | Performance | ✅ Complete |
 | 14 | Spring Batch | Performance | ⬜ |
 | 15 | Metrics (Actuator, Prometheus, Grafana) | Performance | ⬜ |
 | 16 | Centralized logging (Grafana Loki) | Performance | ⬜ |

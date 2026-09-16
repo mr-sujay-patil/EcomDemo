@@ -8,6 +8,7 @@ import java.time.ZoneOffset;
 import com.ecomdemo.cart.Cart;
 import com.ecomdemo.cart.CartService;
 import com.ecomdemo.customer.CustomerService;
+import com.ecomdemo.product.ProductService;
 import com.ecomdemo.common.ConflictException;
 import com.ecomdemo.order.dto.OrderItemResponse;
 import com.ecomdemo.order.dto.OrderResponse;
@@ -58,6 +59,13 @@ class OrderPlacementTest {
     @Mock
     private CustomerService customerService;
 
+    /**
+     * Mocked only so checkout can tell it that stock changed. The eviction itself is Spring's job -
+     * these tests assert that it is asked for, and {@code ProductCacheIT} proves it works.
+     */
+    @Mock
+    private ProductService productService;
+
     @Mock
     private OrderAuditService orderAuditService;
 
@@ -73,7 +81,7 @@ class OrderPlacementTest {
     @BeforeEach
     void setUp() {
         orderPlacement = new OrderPlacement(orderRepository, cartService, customerService,
-                orderAuditService, Clock.fixed(NOW, ZoneOffset.UTC));
+                productService, orderAuditService, Clock.fixed(NOW, ZoneOffset.UTC));
         cart = new Cart(TestFixtures.customer(CUSTOMER_ID));
         keyboard = TestFixtures.product(1L, "Mechanical Keyboard", "129.99", 40);
         monitor = TestFixtures.product(3L, "27\" 4K Monitor", "399.00", 15);

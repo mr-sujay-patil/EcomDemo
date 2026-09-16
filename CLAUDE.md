@@ -28,6 +28,7 @@ later one.
 | Schema | Owned by Flyway (`src/main/resources/db/migration`). Hibernate only validates |
 | Running it | `docker compose up -d --build` (app + PostgreSQL), or `./mvnw spring-boot:run` against a local database |
 | Security | Spring Security, JWT bearer tokens, stateless. Roles `CUSTOMER` and `ADMIN` |
+| Cache | Redis, via Spring's cache abstraction. Product reads only |
 
 ## Build commands
 
@@ -267,6 +268,31 @@ even if the hash is the password.
   authenticated test returns 401.
 - Tests calling services directly need `TestSecurity.actAs(...)` for `@PreAuthorize` to evaluate —
   including inside any worker thread, since `SecurityContextHolder` is thread-local.
+
+## Caching
+
+**Cache what is read to be displayed, never what is read to make a decision.** `findById` and
+`findAll` are cached; **`ProductService.requireEntity` is not, and must not be** — it carries
+`stockQuantity` and feeds the checkout stock check, so a cached value would let two shoppers oversell
+the last unit.
+
+**Every cache declares its value type** in `CacheConfiguration`. Adding a cache means adding a
+`RedisCacheConfiguration` for it with a `JacksonJsonRedisSerializer` for what it holds; the generic
+polymorphic serializer is deliberately not used, so there are no type names in the stored JSON.
+
+**Evict by key, not `allEntries = true`.** `RedisCache.clear()` was measured not to remove entries
+here, and it fails by serving stale data rather than erroring. `findAll` caches under the explicit
+key `product-list::all` for that reason.
+
+**Every write path must evict**, including ones in other features — checkout evicts the products
+whose stock it changed. A TTL is a backstop, not the mechanism.
+
+**Watching it work:** `docker compose logs app | grep com.ecomdemo.cache` shows HIT / MISS / PUT /
+EVICT, and `docker compose exec redis redis-cli GET 'products::3'` shows the stored JSON. In tests,
+Failsafe writes that output to `target/failsafe-reports/<class>.txt`, not to Maven's stdout.
+
+**The fast suite runs with `spring.cache.type=none`** so `./mvnw test` needs no Docker; integration
+tests get a real Redis container from `AbstractPostgresIT`.
 
 ## Transactions and concurrency
 

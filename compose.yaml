@@ -47,6 +47,38 @@ services:
 
     restart: unless-stopped
 
+  redis:
+    image: redis:8-alpine
+    # No published port. The application reaches it as `redis` on the compose network, exactly as it
+    # reaches `postgres` - nothing outside the stack needs it. To poke around with redis-cli:
+    #   docker compose exec redis redis-cli
+    command:
+      # A cache must be allowed to forget things. maxmemory plus an eviction policy is what turns
+      # Redis from "a datastore that will eventually refuse writes" into "a cache that discards what
+      # has not been used lately": allkeys-lru evicts the least recently used key of any kind once
+      # the limit is reached, which is the right policy when every key is disposable.
+      #
+      # Without this, a full Redis starts returning OOM errors on writes instead of making room, and
+      # a cache that fails writes is worse than no cache.
+      - redis-server
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+      # No persistence: everything here can be rebuilt from PostgreSQL, so writing it to disk buys
+      # nothing and costs I/O. This is also why redis has no volume while postgres does.
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
   app:
     build:
       context: .
@@ -56,6 +88,8 @@ services:
       postgres:
         # Not just "started" - "started and answering". This is the single most valuable line in the
         # file, and the default (service_started) is what makes people add sleeps to entrypoints.
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
     environment:
@@ -68,6 +102,10 @@ services:
       POSTGRES_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-ecomdemo}
       POSTGRES_USER: ${POSTGRES_USER:-ecomdemo}
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - copy .env.example}"
+
+      # redis, not localhost - the same container-networking rule as the database.
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: "6379"
 
       # Without this the application generates a random signing key on every start, so every restart
       # invalidates every token that was issued before it (Phase 9).

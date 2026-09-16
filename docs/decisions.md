@@ -864,3 +864,98 @@ this phase can demonstrate end to end.
 - New-code conditions need history to mean anything, which a first analysis does not have.
 - The quality gate lives in the SonarQube instance, not in the repository. Rebuilding the volume
   loses it; `docs/quality-gate.md` records the conditions so it can be recreated.
+
+---
+
+## Phase 13 — Caching
+
+**Cache-aside, which is what `@Cacheable` already is.** Look in the cache; on a miss, call the method
+and store the result. The application remains the only thing that knows how to produce a value -
+Redis never reads PostgreSQL itself - so losing Redis entirely costs performance, not correctness.
+That is the property worth having: the cache is an optimisation, and the system is still complete
+without it.
+
+**`requireEntity` is not cached, and that is the most important decision in the phase.** It is what
+the cart and checkout call, it returns the entity carrying `stockQuantity`, and caching it would let
+two simultaneous shoppers both pass the "is there enough?" check against the same remembered number -
+quietly undoing the optimistic locking of Phase 6 at exactly the point it exists to protect. The rule
+that generalises: cache what is read to be displayed, never what is read to make a decision.
+
+**Checkout evicts the products whose stock it changed.** The alternative was letting the catalogue
+show a figure that ordering had already moved, for up to a TTL. It couples the order feature to the
+knowledge that products are cached, which is a real cost - but a visibly wrong number is worse than a
+named dependency, and the coupling is one line with a comment rather than a hidden assumption.
+
+**The eviction happens inside the transaction, and that leaves a race.** A concurrent reader can miss,
+load the still-uncommitted old row and repopulate the cache with it, so the stale value outlives the
+eviction. The TTL bounds how long. Closing it properly means evicting after commit through a
+transaction synchronisation, which is more machinery than this phase needs - but the race is real and
+is noted in the code rather than glossed over.
+
+**JSON, and one known type per cache rather than polymorphic typing.** Java serialization is rejected
+for the usual three reasons: opaque bytes, a binary contract over every cached class, and
+deserialisation as a code-execution primitive. The usual JSON replacement records each value's class
+in the document so it can rebuild anything - which reintroduces the third problem in friendlier
+clothing and has to be fenced off with a type validator. Neither cache here is polymorphic:
+`products` holds a `ProductResponse`, `product-list` a `List<ProductResponse>`. Declaring that
+removes the type names, the validator and the risk together. The cost is that a new cache must
+declare its type, which is small and loud.
+
+**Both of the above were found by running it, not by reasoning about it.**
+`GenericJacksonJsonRedisSerializer` with `enableDefaultTyping` wrote an `@class` property and then
+expected Jackson's wrapper-array form on read - every entry serialised cleanly and failed coming
+back. Without that call it wrote no type at all and every read produced a `LinkedHashMap`. The
+diagnostic that settled it was dumping the raw value with `redis-cli`, which is itself an argument
+for JSON: the same investigation against Java-serialized bytes would have told me nothing.
+
+**`allEntries = true` silently did not invalidate.** Measured here, `RedisCache.clear()` left the
+entry in place while `evict(key)` removed it. That failure mode is the dangerous one - no error, just
+stale data - and it would have been easy to ship, because the code reads exactly as though it works.
+The list now caches under one explicit key, `product-list::all`, so every eviction is a targeted
+`evict`. The explicit key is better anyway: Spring's default for a no-argument method is
+`SimpleKey []`, which is unpleasant to meet in `redis-cli`.
+
+**TTL per cache, and a TTL on everything.** Ten minutes for a single product, two for the catalogue
+list - the list is one key covering everything, so it is the entry most likely to be subtly wrong and
+gets the shorter life. A TTL is not optional even with eviction on every write path: it is the
+backstop for an eviction somebody forgets to add, and without one a missed eviction is wrong until
+Redis restarts.
+
+**Redis runs with `maxmemory` and `allkeys-lru`, and no persistence.** Eviction policy is the
+difference between a cache and a datastore that eventually refuses writes: with a limit and a policy,
+a full Redis discards the least recently used key; without them it returns OOM errors, and a cache
+that fails writes is worse than no cache. Persistence is off because everything here can be rebuilt
+from PostgreSQL, which is also why `redis` has no volume while `postgres` does.
+
+**Hit and miss logging comes from a decorator applied by a `BeanPostProcessor`.** Declaring a
+`CacheManager` bean directly would make Boot's auto-configuration back off and take the serializers
+and TTLs with it; wrapping afterwards keeps all of that. The decorator exists because Spring's cache
+abstraction is deliberately invisible - a cache that never hits looks exactly like one that always
+does, only slower.
+
+**The fast suite runs with `spring.cache.type=none`.** Unit and slice tests are about behaviour, not
+caching, and requiring Redis for them would undo Phase 7's rule that `./mvnw test` needs no Docker.
+The integration tests get a real Redis container, because they run the production configuration and
+that configuration now has a cache in it.
+
+**Testcontainers core `GenericContainer`, not a Redis module.** Testcontainers 2.x has no Redis module
+in its BOM, and the community `com.redis:testcontainers-redis` targets the 1.x line.
+`@ServiceConnection(name = "redis")` on a generic container is three lines and cannot be version-
+mismatched.
+
+### Redis data types, and why only strings appear here
+
+Redis offers strings, hashes, lists, sets and sorted sets. Spring's cache abstraction uses **strings**
+exclusively: one key per cached value, holding a serialized document, because that is all a cache
+needs - get, set, expire. The others matter when Redis is used as a data structure server rather than
+a cache: a **hash** for an object whose fields are updated individually, a **list** for a queue, a
+**set** for membership tests, a **sorted set** for leaderboards or rate-limiting windows. None of
+those fit "remember what this method returned", which is why this phase's Redis usage is entirely
+strings with TTLs.
+
+### Known gaps, deferred on purpose
+
+- Eviction inside the transaction leaves a small repopulation window.
+- The catalogue list is a single key, so any product change invalidates all of it.
+- No cache hit-ratio metrics; logs only, until Actuator and Micrometer in Phase 15.
+- No cache warming, and no protection against a stampede when a hot key expires.

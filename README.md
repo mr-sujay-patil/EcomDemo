@@ -1272,3 +1272,121 @@ comment**, not silently suppressed in code.
   the SonarQube volume.
 - The `sonarqube:lts-community` tag is the 9.9 line, whose schema migrations **fail on PostgreSQL 18**.
   `compose.sonar.yaml` uses current CE with PostgreSQL 16 for that reason.
+
+---
+
+## Phase 13 — Caching
+
+**Added:** Redis, as a cache in front of the product reads. `compose.yaml` gains a `redis` service;
+product lookups are served from memory until something changes them.
+
+- **`@Cacheable`** on `findById` and `findAll`, **`@CachePut`** on update, **`@CacheEvict`** on create,
+  delete, and on checkout reducing stock.
+- **JSON values**, one known type per cache — no Java serialization and no polymorphic typing.
+- **TTL per cache**: 10 minutes for a product, 2 for the catalogue list.
+- **HIT / MISS / PUT / EVICT logging**, so the behaviour is observable.
+
+### Seeing it work
+
+```bash
+docker compose up -d --build
+curl -s localhost:8080/api/products/3 >/dev/null     # first read
+curl -s localhost:8080/api/products/3 >/dev/null     # second read
+docker compose logs app | grep -E "com.ecomdemo.cache|Hibernate"
+```
+
+```
+MISS products::3
+Hibernate:
+    from
+        products p1_0        ← the database is read once
+PUT  products::3
+HIT  products::3             ← second read: no SQL at all
+```
+
+**Updates invalidate it:**
+
+```
+HIT   products::3
+PUT   products::3            ← @CachePut writes the new value through
+EVICT product-list::all      ← the catalogue list is dropped
+HIT   products::3            ← next read serves 349.00, the new price
+```
+
+**Checkout evicts the stock it changed**, so the catalogue never shows a number that ordering has
+already moved:
+
+```
+catalogue stock before: 40
+order -> 201
+EVICT products::1
+EVICT product-list::all
+catalogue stock after:  38
+```
+
+### What is actually in Redis
+
+```bash
+docker compose exec redis redis-cli KEYS '*'
+docker compose exec redis redis-cli GET 'products::3'
+docker compose exec redis redis-cli TTL 'products::3'
+```
+
+```
+products::3
+{"id":3,"name":"Repriced Monitor","description":"...","price":349.00,"stockQuantity":15,"category":"Displays"}
+588
+```
+
+Readable, and that is the point of choosing JSON. Java serialization would put opaque bytes there,
+make every cached class part of a binary contract, and turn "deserialise this" into a
+remote-code-execution primitive.
+
+Note the TTLs differ per cache — 588 of 600 seconds for a product, and `product-list::all` counting
+down from 120.
+
+### What is deliberately **not** cached
+
+`ProductService.requireEntity()` — the lookup the cart and checkout use. It returns the entity
+carrying `stockQuantity`, and caching it would hand two simultaneous shoppers the same remembered
+stock figure, letting both pass the "is there enough?" check and overselling the last unit that Phase
+6's optimistic locking exists to protect.
+
+**Cache what is read to be displayed; never what is read to make a decision.**
+
+### Tests
+
+```bash
+./mvnw clean verify        # 139 unit + 36 integration
+```
+
+`ProductCacheIT` proves it by **changing the database behind the cache's back** — writing through the
+repository, which no annotation watches — and then reading through the service. If the old value
+comes back, the read never touched the row. That is a stronger claim than counting queries.
+
+The fast suite runs with `spring.cache.type=none`, so `./mvnw test` still needs no Docker.
+
+### Two things that went wrong, worth knowing
+
+**Polymorphic typing did not round-trip.** The usual `GenericJacksonJsonRedisSerializer` with
+`enableDefaultTyping` wrote the type as an `@class` property and then expected Jackson's
+wrapper-array form when reading, failing with *"expected VALUE_STRING … that contains type id"*.
+Without that call it wrote no type at all and every read came back a `LinkedHashMap`. Neither cache
+needs polymorphism — each holds exactly one shape — so each is configured with a serializer for that
+type. No type names, nothing to validate, and readable documents.
+
+**`allEntries = true` silently did not invalidate.** Measured here, `RedisCache.clear()` left the
+entry in place while `evict(key)` removed it. A cache configured that way fails by serving stale
+data rather than by erroring. The list now caches under one explicit key, `product-list::all`, and
+every eviction is targeted.
+
+### Known limits of Phase 13
+
+- **Eviction happens inside the transaction**, so a concurrent reader can briefly repopulate the
+  cache with the pre-commit row. The TTL bounds it; closing it properly needs an after-commit hook.
+- **Checkout knows the product cache exists.** That coupling is the price of never showing stock the
+  order path has already changed.
+- **The list is one key**, so any product change invalidates the whole catalogue. Fine for ten
+  products, wrong for ten thousand.
+- No cache metrics — hit ratio is visible in logs only. Actuator and Micrometer arrive in Phase 15.
+- Redis holds no persistence on purpose: everything in it can be rebuilt from PostgreSQL.
