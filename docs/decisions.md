@@ -61,9 +61,54 @@ local Git is used — no remote, no PR template, no branch protection, no tag. T
 
 ### Known gaps, deferred on purpose
 
-- `docs/Roadmap.md` is spelled with a capital R on disk while the roadmap text refers to
-  `docs/ROADMAP.md`. macOS resolves both because its filesystem is case-insensitive; this will break
-  on Linux once CI exists (Phase 11). Left as-is rather than renamed unasked.
+- ~~`docs/Roadmap.md` is spelled with a capital R on disk while the roadmap text refers to
+  `docs/ROADMAP.md`.~~ Resolved in Phase 1.
 - `Product.stockQuantity` has no optimistic lock, so two concurrent checkouts for the last unit can
   both succeed. That is exactly the problem Phase 6 exists to solve.
-- There is no `CLAUDE.md` yet — it is a Phase 1 deliverable.
+- ~~There is no `CLAUDE.md` yet — it is a Phase 1 deliverable.~~ Added in Phase 1.
+
+---
+
+## Phase 1 — Git & GitHub Workflow
+
+**`main` was repointed rather than merged.** `main` sat on `fa76668`, an orphan left behind when a
+`git commit --amend --reset-author` on the Phase 0 branch rewrote the same commit as `d56ed25`. Both
+had the identical tree `d0c3f01`, so `git branch -f main feature/phase-00-baseline-monolith` lost
+nothing. A real merge would have grafted a duplicate root commit into the history to no benefit.
+Phase 0 therefore landed on `main` directly; the roadmap starts the PR workflow at Phase 1, and
+Phase 1 itself was merged through one.
+
+**Squash merge for phase branches.** `main` gets one commit per phase, so `git log --oneline` on
+`main` reads as the roadmap itself. The granular commits are not lost — they stay visible in the PR,
+which is where the step-by-step reasoning is actually useful. The cost is that `main`'s commits no
+longer correspond to anything on a branch, which is why each phase is also tagged.
+
+**Annotated tags, not lightweight ones.** `git tag -a phase-XX-complete` creates a real object
+carrying a tagger, a date and a message. A lightweight tag is only a pointer, with no record of who
+made it or why — fine for a scratch bookmark, wrong for something that marks a milestone.
+
+**Branch protection: PR required, zero approvals, admins not enforced.** `main` refuses direct
+pushes and force-pushes, and every change must arrive through a PR. Requiring an approving review
+would be more realistic, but with a single maintainer GitHub will not let you approve your own PR —
+the rule would only ever be satisfied by bypassing it. Zero approvals keeps the gate genuine rather
+than theatrical. `enforce_admins` is off for the same reason: it would leave nobody able to merge.
+Turn both up the moment a second contributor appears.
+
+**No required status checks.** There is no CI yet — GitHub Actions is Phase 11. Adding a required
+check with nothing to run it would block every merge permanently.
+
+**Roadmap renamed to `docs/ROADMAP.md`.** Flagged as a known gap in Phase 0 and fixed here, since
+this phase owns the file's location. macOS's case-insensitive filesystem makes a direct
+`git mv Roadmap.md ROADMAP.md` a silent no-op, so it was done in two steps via a temporary name to
+force Git to record the rename.
+
+**Branch name normalised.** The phase prompt asked for `feature/phase-01-Phase 1: Git & GitHub
+Workflow`. Git rejects that — `check-ref-format` forbids `:` in a ref name — so the roadmap's own
+convention was used: `feature/phase-01-git-github-workflow`.
+
+### Known gaps, deferred on purpose
+
+- No CI, no `.github/workflows/`, and no required status checks — Phase 11.
+- No `CODEOWNERS`, issue templates or Dependabot config; none is named by this phase.
+- `enforce_admins` is off, so an admin can still push to `main` in an emergency. Acceptable for a
+  solo repository, worth revisiting with collaborators.

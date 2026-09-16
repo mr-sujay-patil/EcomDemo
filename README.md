@@ -3,8 +3,9 @@
 A learning project that grows an e-commerce backend from a single Spring Boot monolith into a
 production-grade distributed system, adding **exactly one** technology per phase.
 
-The full plan lives in [`docs/ROADMAP.md`](docs/Roadmap.md). Decisions made along the way are
-recorded in [`docs/decisions.md`](docs/decisions.md).
+The full plan lives in [`docs/ROADMAP.md`](docs/ROADMAP.md). Decisions made along the way are
+recorded in [`docs/decisions.md`](docs/decisions.md), and the conventions every change follows
+are in [`CLAUDE.md`](CLAUDE.md).
 
 **Stack:** Java 21 · Spring Boot 4.1.1 · Maven
 
@@ -122,8 +123,57 @@ Every mutating cart endpoint returns the whole updated cart, so a client never n
 | `404` | The product, order or cart line does not exist |
 | `409` | The request is valid but the state forbids it — not enough stock, or an empty cart |
 
-### Known limits of this phase
+### Known limits of Phase 0
 
 Deliberately out of scope, each scheduled for a later phase: there is no security (Phase 8), the
 database is in-memory and wiped on restart (Phase 4), and two concurrent orders for the last unit in
 stock can both succeed (Phase 6).
+
+---
+
+## Phase 1 — Git & GitHub Workflow
+
+**Added:** Git and GitHub. No application code changed — `pom.xml` and everything under `src/` are
+untouched, which is exactly why `./mvnw clean verify` is still green.
+
+This phase puts the project under the workflow every later phase will follow.
+
+- **On GitHub** at [`mr-sujay-patil/EcomDemo`](https://github.com/mr-sujay-patil/EcomDemo), with
+  `main` protected — no direct pushes, every change through a Pull Request.
+- **Branching:** `main` is always working; each phase gets `feature/phase-XX-<short-name>`.
+- **Conventional Commits** (`feat:`, `fix:`, `test:`, `docs:`, `chore:`, `refactor:`), scoped to the
+  feature package where there is one.
+- **[`CLAUDE.md`](CLAUDE.md)** — the conventions, build commands and workflow in one place.
+- **[PR template](.github/pull_request_template.md)** — what changed, how it was tested, and a
+  checklist enforcing the roadmap's ground rules.
+- **Tags:** each finished phase is tagged `phase-XX-complete`.
+
+### Contributing
+
+```bash
+git checkout main && git pull
+git checkout -b feature/phase-XX-short-name
+
+# ...work, committing as you go...
+git commit -m "feat(cart): add coupon support"
+
+./mvnw clean verify            # must pass before you open the PR
+git push -u origin feature/phase-XX-short-name
+gh pr create                   # the template is filled in for you
+```
+
+Phase branches are **squash-merged**, so `main` reads as one commit per phase while the granular
+commits stay visible in the PR. After merging:
+
+```bash
+git checkout main && git pull
+git tag -a phase-XX-complete -m "Phase XX: ..." && git push origin phase-XX-complete
+```
+
+### Browsing history
+
+```bash
+git log --oneline --graph          # the phase-by-phase history
+git tag -l -n1                     # every completed phase
+git show phase-00-complete         # the baseline monolith
+```
