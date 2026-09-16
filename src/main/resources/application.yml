@@ -41,6 +41,68 @@ ecomdemo:
     # token still works is exactly its remaining lifetime.
     expiry: 15m
 
+# Actuator: what the outside world may ask this application about itself.
+#
+# Everything here is deny-by-default in the same spirit as the security rules. Actuator ships around
+# two dozen endpoints; exposure is an explicit allow-list, and the default is `health` alone.
+management:
+  endpoints:
+    web:
+      exposure:
+        # The four this phase needs, and nothing else. /actuator/env and /actuator/beans in
+        # particular are reconnaissance aids - env prints resolved configuration, which is where
+        # connection strings live.
+        include: health,info,metrics,prometheus
+
+  endpoint:
+    health:
+      # Anonymous callers get {"status":"UP"} and nothing more. An administrator gets the component
+      # breakdown. The breakdown names the database and Redis and reports their state, which tells
+      # an attacker what to aim at and when it is already struggling.
+      show-details: when-authorized
+      roles: ADMIN
+
+      group:
+        # Liveness answers one question: "is this process broken beyond recovery?" The only cure for
+        # a NO is a restart, so the group deliberately contains NOTHING but the application's own
+        # state - no database, no Redis.
+        #
+        # Wiring a dependency in here is a classic and expensive mistake: a database blip would make
+        # every instance report itself dead, the orchestrator would restart all of them at once, and
+        # a brief outage becomes a total one. The database does not get better because the
+        # application was restarted.
+        liveness:
+          include: livenessState
+
+        # Readiness answers a different question: "should traffic be sent here right now?" A NO
+        # removes the instance from the load balancer and leaves it running, so depending on
+        # infrastructure is exactly right - an instance that cannot reach PostgreSQL can serve
+        # nothing useful and should stop being asked to.
+        readiness:
+          include: readinessState,db,redis
+
+  health:
+    # Off by default outside Kubernetes, and without it neither livenessState nor readinessState
+    # exists as an indicator - the two groups above would then fail startup, because
+    # management.endpoint.health.validate-group-membership defaults to true and refuses to build a
+    # group out of indicators that are not there. That validation is worth keeping: a typo in a
+    # group would otherwise produce a group that silently checks nothing and always says UP.
+    probes:
+      enabled: true
+
+  metrics:
+    distribution:
+      # Ship a histogram, not a pre-computed average, for these two timers.
+      #
+      # An average latency hides everything worth knowing - it is dominated by the fast majority and
+      # says nothing about the slow tail users actually complain about. A histogram is a set of
+      # bucket counters, which Prometheus can add up across instances, so p95 for the whole service
+      # is computable from the parts. Percentiles calculated per-instance cannot be averaged
+      # together and are wrong the moment there is more than one replica.
+      percentiles-histogram:
+        http.server.requests: true
+        order.checkout: true
+
 server:
   error:
     include-stacktrace: never

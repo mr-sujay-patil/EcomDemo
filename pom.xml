@@ -173,6 +173,40 @@
             <artifactId>spring-boot-flyway</artifactId>
         </dependency>
 
+        <!--
+            Actuator: the operational endpoints (health, info, metrics) and the machinery that
+            exposes them over HTTP.
+
+            In Boot 4 this single starter is more than it looks. It pulls in
+            spring-boot-starter-micrometer-metrics - which carries Micrometer itself, the JVM and
+            HTTP meter binders, and the Prometheus *auto-configuration* - and spring-boot-health,
+            which carries the health groups this phase uses for liveness and readiness. The
+            per-technology split that needed a separate module for Flyway and for the test slices
+            does not bite here: one starter covers all three.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!--
+            The Prometheus meter registry - the thing that actually holds the meters in Prometheus's
+            data model and renders them in its text exposition format.
+
+            The starter above brings the auto-configuration for this registry but not the registry,
+            which is a distinction worth understanding: without this dependency the application
+            starts perfectly, /actuator/health works, and /actuator/prometheus is simply absent. No
+            error, no warning - the @ConditionalOnClass guarding PrometheusMetricsExportAutoConfiguration
+            just never matches. That is the same failure shape as spring-boot-flyway in Phase 5.
+
+            The version comes from micrometer-bom, which the Spring Boot parent already imports
+            (Micrometer 1.17.1 under Spring Boot 4.1.1).
+        -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
         <!-- JUnit 5, AssertJ, @SpringBootTest and TestRestTemplate. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -248,6 +282,21 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <executions>
+                    <!--
+                        Writes target/classes/META-INF/build-info.properties at package time, which
+                        is what /actuator/info reports. Without it the info endpoint is exposed and
+                        returns {} - technically working, and useless.
+
+                        This is build metadata, not a new technology: the plugin was already here.
+                    -->
+                    <execution>
+                        <id>build-info</id>
+                        <goals>
+                            <goal>build-info</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
 
             <!--

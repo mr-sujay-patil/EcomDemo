@@ -93,6 +93,32 @@ public class WebSecurityConfiguration {
                         // deliberately cannot place orders - a role is a job, not a rank.
                         .requestMatchers("/api/cart/**", "/api/orders", "/api/orders/**").hasRole("CUSTOMER")
 
+                        /*
+                         * Actuator. Rules are matched in order, so the anonymous ones come first.
+                         *
+                         * health and info must be anonymous: a Docker healthcheck and - from Phase 25
+                         * - a Kubernetes probe have no way to obtain a token, and a probe that cannot
+                         * authenticate is a probe that always fails. show-details is `when-authorized`,
+                         * so an anonymous caller sees {"status":"UP"} and nothing about the components.
+                         *
+                         * prometheus must be anonymous for a duller reason: Prometheus scrapes on a
+                         * timer, forever, and the only credential this API issues expires in fifteen
+                         * minutes with no refresh flow. There is no way for a scraper to hold one.
+                         *
+                         * That is a real exposure - the scrape output lists every URI template and its
+                         * error counts. It is acceptable here because the whole stack is one compose
+                         * network; the production answer is management.server.port on a port that is
+                         * never published, which splits the Spring context in two and is a phase's work
+                         * in its own right. Recorded in docs/decisions.md rather than half-done.
+                         */
+                        .requestMatchers(HttpMethod.GET,
+                                "/actuator/health", "/actuator/health/**",
+                                "/actuator/info", "/actuator/prometheus").permitAll()
+
+                        // The browsable JSON view of the same data. A human reads this one, and a
+                        // human can hold a token - so this one is not given away.
+                        .requestMatchers("/actuator", "/actuator/**").hasRole("ADMIN")
+
                         // Anything not named above requires a login. Denying by default means adding
                         // an endpoint cannot accidentally publish it.
                         .anyRequest().authenticated())
