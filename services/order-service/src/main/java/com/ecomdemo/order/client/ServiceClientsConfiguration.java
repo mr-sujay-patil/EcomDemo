@@ -49,7 +49,26 @@ import org.springframework.web.service.invoker.HttpServiceProxyFactory;
 public class ServiceClientsConfiguration {
 
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(2);
-    private static final Duration READ_TIMEOUT = Duration.ofSeconds(5);
+
+    /**
+     * Ten seconds, not the five this started at.
+     *
+     * <p>Five was chosen against what a shopper will tolerate, which is the right instinct and the
+     * wrong number for a first request. A cold JVM on a loaded machine takes several seconds to
+     * serve its first call - class loading, JIT, the connection pool opening its first connection -
+     * and a timeout tuned for the steady state turns the very first checkout after `docker compose
+     * up` into a 500 that points at a service which is perfectly healthy.
+     *
+     * <p>That is worth stating as a general rule rather than as a fix: a timeout has to cover the
+     * slowest legitimate response, not the typical one, and "the first request after a deploy" is
+     * legitimate. Making it shorter does not make the system faster; it makes the system report
+     * failure sooner, which is only an improvement if the thing it is waiting for was never going to
+     * answer.
+     *
+     * <p>Ten seconds is still a bound, and the bound is the point - see the class comment for what
+     * an unbounded read does to a thread pool.
+     */
+    private static final Duration READ_TIMEOUT = Duration.ofSeconds(10);
 
     @Bean
     public CatalogClient catalogClient(

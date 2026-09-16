@@ -2,6 +2,7 @@ package com.ecomdemo.order.client;
 
 import java.util.List;
 
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.service.annotation.GetExchange;
 import org.springframework.web.service.annotation.HttpExchange;
 
@@ -18,6 +19,14 @@ import org.springframework.web.service.annotation.HttpExchange;
  *
  * <p>Spring builds the implementation at startup from this interface over a {@code RestClient} - the
  * same machinery, with the plumbing generated.
+ *
+ * <p><strong>Every parameter needs an explicit annotation.</strong> {@code @PathVariable} and
+ * {@code @RequestBody} are not optional here, as they nearly are on an MVC controller: an HTTP
+ * service interface has no other way to know what a parameter is for, and an unannotated one fails
+ * at <em>call</em> time with "Could not resolve parameter [0] ... No suitable resolver" rather than
+ * at startup. That turns a missing annotation into a 500 on the first real request, which is exactly
+ * how it was found here - every test mocked this interface, so nothing built the proxy until the
+ * stack ran.
  *
  * <h2>What can go wrong here, and what is not done about it</h2>
  *
@@ -42,7 +51,7 @@ public interface CatalogClient {
      * {@code order_items} - so a price change a second later cannot rewrite what somebody paid.
      */
     @GetExchange("/{id}")
-    CatalogProduct findById(Long id);
+    CatalogProduct findById(@PathVariable Long id);
 
     /**
      * Every product, for pricing a whole cart without one call per line.
