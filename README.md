@@ -966,3 +966,114 @@ tampered payload, a token signed with someone else's key, an expired one, and gi
   is still open, and should add the `bearerAuth` security scheme when it lands.
 - Tokens still travel unprotected over plain HTTP locally. Over the open internet this demands TLS
   without exception: a bearer token is exactly as sensitive as the password it replaced.
+
+---
+
+## Phase 10 — Containerization
+
+**Added:** Docker and Docker Compose. The whole system — application and database — starts with one
+command, and the image is built the same way on every machine.
+
+- **Multi-stage `Dockerfile`** — build with the project's own `./mvnw` on a JDK, explode the layered
+  jar, ship only the layers on a slim Alpine JRE.
+- **Runs as a non-root user**, with `-XX:MaxRAMPercentage` so the JVM uses its container's memory.
+- **`compose.yaml`** — app + PostgreSQL, health checks, a named volume, and environment variables.
+- **`.env.example`**; `.env` stays gitignored.
+
+### Start everything
+
+```bash
+cp .env.example .env
+# edit .env: set POSTGRES_PASSWORD, and JWT_SECRET to `openssl rand -base64 48`
+
+docker compose up -d --build
+docker compose ps
+```
+
+```
+SERVICE    STATUS                    PORTS
+app        Up 17 seconds (healthy)   0.0.0.0:8080->8080/tcp
+postgres   Up 22 seconds (healthy)   5432/tcp
+```
+
+Note `postgres` has **no host binding**. The application reaches it over the compose network; your
+laptop cannot. Add `ports: ["5432:5432"]` to the postgres service if you want DBeaver.
+
+### The curl flow, against the container
+
+```bash
+curl -s localhost:8080/api/products | jq length                       # 10 - Flyway ran inside the container
+
+TOKEN=$(curl -s -XPOST localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"admin@ecomdemo.local","password":"admin123"}' | jq -r .accessToken)
+
+curl -s -H "Authorization: Bearer $TOKEN" -XPOST localhost:8080/api/products \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Container Widget","description":"made inside a container","price":33.00,"stockQuantity":9}' | jq
+
+curl -s -XPOST localhost:8080/api/customers/register -H 'Content-Type: application/json' \
+  -d '{"email":"sam@example.com","password":"password123","displayName":"Sam"}' | jq
+```
+
+Everything Phases 4–9 added works unchanged: migrations, JWT, roles, per-user carts.
+
+### Data survives `down`
+
+```bash
+docker compose down        # containers and network destroyed; the volume is not
+docker compose up -d
+curl -s localhost:8080/api/products/11 | jq     # still there, with its reduced stock
+```
+
+`docker compose down -v` is the one that removes the volume, and that is the only way to lose the
+data. The database lives in a **named volume**, not in the container's writable layer — which would
+be deleted along with the container every time.
+
+### Image size
+
+Measured on this project (arm64, uncompressed as Docker reports it):
+
+| | Size |
+|---|---|
+| Build stage (JDK + Maven cache + sources) | **1.19 GB** |
+| Final runtime image | **399 MB** |
+
+The build stage is thrown away. That is what "multi-stage" buys: the compiler, the Maven repository
+and the 59 MB fat jar never reach the thing you deploy.
+
+Inside that image, the layers are split by how often they change:
+
+```
+59 MB    COPY /extracted/dependencies/        ← changes when pom.xml changes
+696 kB   COPY /extracted/spring-boot-loader/
+4 kB     COPY /extracted/snapshot-dependencies/
+426 kB   COPY /extracted/application/         ← changes on every commit
+```
+
+Editing one Java file rebuilds and pushes the **426 kB** layer. Without layering it would be a new
+59 MB layer every time.
+
+### Tests
+
+```bash
+./mvnw clean verify        # 139 unit + 28 integration
+./mvnw test -Dtest='ContainerConfigurationTest*'
+```
+
+`ContainerConfigurationTest` pins what `docker compose up` cannot tell you: that the container is
+non-root, that the jar is still layered, that the app waits for the database to be *healthy*, and
+that no secret is a literal. Every one of those regressions produces a stack that starts and works.
+
+### Known limits of Phase 10
+
+- **The image is built from the host's source tree, not from a tagged commit.** Reproducibility stops
+  at "same Dockerfile, same base image digest"; the base images are pinned by tag, not digest, so
+  `21-jre-alpine` can change under you. Digest pinning is the next step.
+- **No registry.** The image exists only on the machine that built it. Pushing it somewhere is part
+  of CI in Phase 11.
+- **The health check probes `/api/products`**, a business endpoint doing an ops job, because
+  Actuator is Phase 15.
+- `docker compose up --build` rebuilds from scratch when `pom.xml` changes, which takes a couple of
+  minutes. That is the dependency layer doing its job, not a fault.
+- The compose stack and the standalone `ecomdemo-postgres` container from Phase 4 are **separate
+  databases** with separate volumes. Data does not move between them.

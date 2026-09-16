@@ -26,6 +26,7 @@ later one.
 | Build | Maven, via the committed wrapper — always `./mvnw`, never a system `mvn` |
 | Database | PostgreSQL 16+ when the app runs (`dev` profile); H2 in-memory when the tests run (`test` profile) |
 | Schema | Owned by Flyway (`src/main/resources/db/migration`). Hibernate only validates |
+| Running it | `docker compose up -d --build` (app + PostgreSQL), or `./mvnw spring-boot:run` against a local database |
 | Security | Spring Security, JWT bearer tokens, stateless. Roles `CUSTOMER` and `ADMIN` |
 
 ## Build commands
@@ -126,6 +127,31 @@ classpath no longer configures it: the test slices need `spring-boot-webmvc-test
 dropped it. When a technology seems not to auto-configure, look for its missing module before
 assuming a config error. Adding such a module is not "a new technology" for the
 one-technology-per-phase rule.
+
+## Containers
+
+**`docker compose up -d --build` is the way to run the whole system.** It needs a `.env` — copy
+`.env.example`. `compose.yaml` refuses to start without `POSTGRES_PASSWORD` and `JWT_SECRET` rather
+than defaulting them.
+
+**The Dockerfile is multi-stage and the order of instructions is load-bearing.** `pom.xml` is copied
+and dependencies resolved *before* `src/`, so editing Java does not re-resolve dependencies. The
+layered jar is extracted with **`-Djarmode=tools extract --layers`** (not the pre-3.3 `layertools`)
+and copied one layer at a time, least-changing first. Keep both properties when editing it.
+
+**The container runs as a non-root user, and `USER` comes after the `COPY`s.** Root in a container is
+root on the host kernel. If you add a step that needs to write at runtime, give it a directory owned
+by `ecomdemo` — do not move `USER` up.
+
+**Anything the app talks to inside compose is addressed by service name**, never `localhost`: each
+container has its own network namespace. The database is not published to the host at all.
+
+**Database state lives in a named volume.** `docker compose down` keeps it; only `down -v` removes
+it. The compose database and the standalone Phase 4 container are separate databases.
+
+**`ContainerConfigurationTest` pins all of the above.** If you change the Dockerfile or
+`compose.yaml`, that test is what tells you whether you broke a property that still boots fine —
+non-root, layering, health-check ordering, no literal secrets.
 
 ## Database migrations
 

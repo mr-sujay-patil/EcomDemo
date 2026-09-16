@@ -1,0 +1,33 @@
+# What NOT to send to the Docker daemon as build context.
+#
+# Everything in this directory is packed up and shipped to the daemon before a build starts, so an
+# ignored file is not merely unused - it is never transferred. This project has ~41 MB of
+# node_modules under frontend/, which would be copied on every single build without the line below.
+
+# The frontend is not part of this image.
+frontend/
+
+# Build output. The image builds its own inside the build stage; copying a host-built target/ in
+# would also make the image depend on whatever JDK happened to be on the developer's machine.
+target/
+out/
+
+# History and tooling.
+.git/
+.github/
+.idea/
+*.iml
+
+# Docker's own files: changing compose.yaml must not invalidate the build cache.
+compose.yaml
+Dockerfile
+.dockerignore
+
+# Local secrets - belt and braces. .env is gitignored, and must never reach an image either.
+.env
+.env.*
+
+# Documentation and editor noise.
+docs/
+*.md
+.DS_Store
