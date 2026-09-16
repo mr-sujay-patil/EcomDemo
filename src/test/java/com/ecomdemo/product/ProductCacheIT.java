@@ -1,6 +1,7 @@
 package com.ecomdemo.product;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.List;
 
 import com.ecomdemo.cart.dto.AddCartItemRequest;
@@ -17,6 +18,7 @@ import org.springframework.cache.CacheManager;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 /**
  * Proves the cache is actually a cache: that a second read does not reach PostgreSQL, and that every
@@ -31,6 +33,26 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>Caching is on here because integration tests run under the {@code dev} profile, against the
  * Redis container in {@link AbstractPostgresIT}. The unit and slice suite runs with
  * {@code spring.cache.type=none}, so it neither needs Redis nor tests it.
+ *
+ * <h2>Why the write-path assertions wait</h2>
+ *
+ * Every assertion in {@code WritesInvalidateTheCache} is wrapped in {@code await()}, and the reason
+ * is a property of the cache rather than a flaky test. In Spring Data Redis 4,
+ * {@code RedisCacheWriter.store} returns a {@code CompletableFuture} - a cache write is dispatched,
+ * not completed, by the time {@code @Cacheable} or {@code @CachePut} returns. Two consequences, both
+ * observed here: a {@code put} still in flight can reach Redis <em>after</em> a {@code del} issued
+ * later, so an evicted entry reappears; and a read immediately after a write-through can still be
+ * served the value that write is replacing.
+ *
+ * <p>The window is sub-millisecond and it took until Phase 17 to see it: the Kafka listener
+ * containers added polling threads to the same JVM, shifted the scheduling, and turned an
+ * always-green assertion into one that failed roughly two runs in five. Nothing in the caching code
+ * changed.
+ *
+ * <p>Waiting is the honest assertion, not a weakened one. What these tests must prove is that a
+ * write path <em>evicts</em> rather than leaving the entry to expire - the TTLs are minutes, so a
+ * two-second window separates "evicted" from "expired" just as decisively as an immediate read
+ * would, and it no longer depends on winning a race with the cache's own write.
  */
 class ProductCacheIT extends AbstractPostgresIT {
 
@@ -125,9 +147,15 @@ class ProductCacheIT extends AbstractPostgresIT {
 
             // THEN the next read sees the new value. @CachePut wrote it through rather than merely
             // evicting, so this read is still a cache hit - just of the right value.
-            ProductResponse afterwards = productService.findById(created.id());
-            assertThat(afterwards.name()).isEqualTo("After Update");
-            assertThat(afterwards.price()).isEqualByComparingTo("99.00");
+            //
+            // Waited for, for the same reason as the two below: the write-through is dispatched
+            // rather than completed when update() returns, so an immediate read can still be served
+            // the value @CachePut is in the middle of replacing.
+            await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
+                ProductResponse afterwards = productService.findById(created.id());
+                assertThat(afterwards.name()).isEqualTo("After Update");
+                assertThat(afterwards.price()).isEqualByComparingTo("99.00");
+            });
         }
 
         @Test
@@ -141,7 +169,8 @@ class ProductCacheIT extends AbstractPostgresIT {
             productService.delete(created.id());
 
             // THEN nothing is left behind to serve a deleted product from
-            assertThat(cacheManager.getCache("products").get(created.id())).isNull();
+            await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
+                    assertThat(cacheManager.getCache("products").get(created.id())).isNull());
         }
 
         @Test
@@ -158,12 +187,14 @@ class ProductCacheIT extends AbstractPostgresIT {
             // WHEN a product is created through the service
             ProductResponse created = createProduct("Appears Immediately", "15.00", 4);
 
-            // THEN it is visible at once - the list entry was dropped rather than left to expire
-            assertThat(productService.findAll())
-                    .as("cached list before create was %s; %d must appear after the eviction",
-                            before, created.id())
-                    .extracting(ProductResponse::id)
-                    .contains(created.id());
+            // THEN it becomes visible - the list entry was dropped rather than left to expire.
+            // The TTL is minutes, so anything inside two seconds can only be the eviction.
+            await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
+                    assertThat(productService.findAll())
+                            .as("cached list before create was %s; %d must appear after the eviction",
+                                    before, created.id())
+                            .extracting(ProductResponse::id)
+                            .contains(created.id()));
         }
     }
 
