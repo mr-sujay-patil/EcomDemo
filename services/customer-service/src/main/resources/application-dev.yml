@@ -1,0 +1,25 @@
+# customer-service against its own PostgreSQL database.
+#
+# The database name is the point of this file. All five services talk to the same PostgreSQL server
+# in compose and to five different databases on it - ecomdemo_customer here, ecomdemo_catalog next
+# door - so no query can reach another service's tables even by accident. PostgreSQL has no
+# cross-database joins, which turns "services must not read each other's data" from a rule people
+# have to remember into one the engine enforces.
+spring:
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/ecomdemo_customer}
+    username: ${POSTGRES_USER:ecomdemo}
+    password: ${POSTGRES_PASSWORD:ecomdemo}
+
+    # The driver class is deliberately not set: HikariCP derives it from the jdbc:postgresql: prefix.
+    hikari:
+      pool-name: CustomerServicePool
+      # Smaller than the monolith's 10, and deliberately so. PostgreSQL's own default limit is 100
+      # connections for the whole server, and there are now five pools competing for it rather than
+      # one. Five services times ten would be half the server's capacity held open by a demo.
+      maximum-pool-size: 5
+      minimum-idle: 1              # keep one warm so the first request does not pay for a handshake
+      connection-timeout: 30000    # ms a caller waits for a free connection before failing fast
+      idle-timeout: 600000         # ms an idle connection above minimum-idle survives (10 min)
+      max-lifetime: 1800000        # ms before a connection is retired (30 min) - must stay below any
+                                   # database or network idle timeout, or the pool hands out dead sockets
