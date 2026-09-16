@@ -20,6 +20,10 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p>Reads run in a read-only transaction (the class-level annotation). Checkout does not run in a
  * transaction at all - it retries one, which is a different job and has to happen outside.
+ *
+ * <p>Since Phase 17 a successful checkout also publishes an {@code orders.placed} event. That
+ * happens here rather than in {@link OrderPlacement} so that it happens after the commit - see
+ * {@link OrderEventPublisher} for why, and for what that still does not guarantee.
  */
 @Service
 @Transactional(readOnly = true)
@@ -36,13 +40,16 @@ public class OrderService {
     private final OrderRepository orderRepository;
     private final OrderPlacement orderPlacement;
     private final OrderMetrics orderMetrics;
+    private final OrderEventPublisher orderEventPublisher;
 
     public OrderService(OrderRepository orderRepository,
                         OrderPlacement orderPlacement,
-                        OrderMetrics orderMetrics) {
+                        OrderMetrics orderMetrics,
+                        OrderEventPublisher orderEventPublisher) {
         this.orderRepository = orderRepository;
         this.orderPlacement = orderPlacement;
         this.orderMetrics = orderMetrics;
+        this.orderEventPublisher = orderEventPublisher;
     }
 
     /**
@@ -90,6 +97,19 @@ public class OrderService {
             OrderResponse order = orderPlacement.placeOnce(customerId);
             orderMetrics.recordCheckout(sample, OrderMetrics.OUTCOME_SUCCESS);
             orderMetrics.recordPlacedOrder(order.totalAmount());
+
+            /*
+             * The event goes out here, for the same reason the meters are here: placeOnce() has
+             * returned, so its transaction has committed and the order genuinely exists. Publishing
+             * from inside OrderPlacement would announce orders that a later rollback erased, and
+             * Kafka has no rollback - the retraction would have to be a second event that every
+             * consumer had to know how to handle.
+             *
+             * It is still a dual write, and the window is now the other way round: the order can be
+             * committed and the event lost. OrderEventPublisher documents that, and Phase 18's
+             * outbox is what closes it.
+             */
+            orderEventPublisher.publishOrderPlaced(order, customerId);
             return order;
         } catch (ConflictException | OptimisticLockingFailureException ex) {
             // The request was well-formed and the server's state refused it - an empty cart, a sold
