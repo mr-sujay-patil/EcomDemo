@@ -15,6 +15,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.web.servlet.client.RestTestClient;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -36,6 +37,15 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
+/**
+ * Its own database. This test commits rows that are never rolled back - that is the whole point of
+ * it - and the {@code test} profile's H2 otherwise lives for the entire JVM and is shared by every
+ * test class. Committed orders would then leak into {@code OrderRepositoryTest}, whose assertions
+ * are about an empty table, and the suite would pass or fail depending on the order JUnit happened
+ * to pick. A distinct URL gives this class a private schema that Flyway migrates on its own.
+ */
+@TestPropertySource(properties =
+        "spring.datasource.url=jdbc:h2:mem:ecomdemo-flow;DB_CLOSE_DELAY=-1;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE")
 class PlaceOrderFlowTest {
 
     private static final ParameterizedTypeReference<List<ProductResponse>> PRODUCT_LIST =
