@@ -152,9 +152,20 @@ services:
     deploy:
       resources:
         limits:
-          # Six JVMs on one Docker VM. Without a limit each one sizes its heap against the whole
-          # machine, which is how Phase 17's stack ended up thrashing at 428% CPU on an idle broker.
-          memory: 384M
+          # 320 MB, and the number was measured rather than guessed.
+          #
+          # Six JVMs on one Docker VM. The first version of this file gave each service 384 MB and
+          # Kafka 1 GB, which totals 3.4 GB before postgres, redis and Docker's own overhead - on a
+          # 3.8 GB VM. The stack came up, reported healthy, and then fell over under the first real
+          # request: the broker could not answer its own 2-second heartbeat, fenced itself, and the
+          # CPU storm that followed pushed catalog-service past order-service's 5-second read
+          # timeout. A checkout failed with "Read timed out" pointing at a service that was perfectly
+          # healthy.
+          #
+          # These services idle at 90-210 MB with -XX:MaxRAMPercentage=75, so 320 MB is roughly
+          # double what they use and the total now leaves 1.4 GB of headroom. Phase 17 learned this
+          # lesson with four JVMs; six is where it stops being a warning.
+          memory: 320M
 
     healthcheck:
       # The readiness probe: does this service consider itself able to take traffic? It includes the
@@ -166,8 +177,19 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-      # Generous: a cold JVM plus Flyway migrations on a new database.
-      start_period: 60s
+      # Three minutes, and it needs to be.
+      #
+      # start_period is a grace window, not a delay: failures inside it do not count against
+      # `retries`, and a service that is ready in 20 seconds is marked healthy in 20 seconds. Setting
+      # it generously costs nothing and setting it tightly costs a lot.
+      #
+      # 60s was the monolith's value and it is not enough for five. `docker compose up` starts all
+      # five cold JVMs at once - five Spring contexts, five Flyway runs, five Hibernate bootstraps
+      # competing for the same cores - and on a contended 3.8 GB VM catalog-service was measured
+      # taking 195 seconds to print "Started". With a 60s start_period plus five 10s retries, compose
+      # declared it unhealthy at 110s and aborted the whole `up` with "dependency failed to start" -
+      # for a service that was working perfectly and simply had not finished yet.
+      start_period: 180s
 
     restart: unless-stopped
 
@@ -224,9 +246,20 @@ services:
     deploy:
       resources:
         limits:
-          # Six JVMs on one Docker VM. Without a limit each one sizes its heap against the whole
-          # machine, which is how Phase 17's stack ended up thrashing at 428% CPU on an idle broker.
-          memory: 384M
+          # 320 MB, and the number was measured rather than guessed.
+          #
+          # Six JVMs on one Docker VM. The first version of this file gave each service 384 MB and
+          # Kafka 1 GB, which totals 3.4 GB before postgres, redis and Docker's own overhead - on a
+          # 3.8 GB VM. The stack came up, reported healthy, and then fell over under the first real
+          # request: the broker could not answer its own 2-second heartbeat, fenced itself, and the
+          # CPU storm that followed pushed catalog-service past order-service's 5-second read
+          # timeout. A checkout failed with "Read timed out" pointing at a service that was perfectly
+          # healthy.
+          #
+          # These services idle at 90-210 MB with -XX:MaxRAMPercentage=75, so 320 MB is roughly
+          # double what they use and the total now leaves 1.4 GB of headroom. Phase 17 learned this
+          # lesson with four JVMs; six is where it stops being a warning.
+          memory: 320M
 
     healthcheck:
       # The readiness probe: does this service consider itself able to take traffic? It includes the
@@ -238,8 +271,19 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-      # Generous: a cold JVM plus Flyway migrations on a new database.
-      start_period: 60s
+      # Three minutes, and it needs to be.
+      #
+      # start_period is a grace window, not a delay: failures inside it do not count against
+      # `retries`, and a service that is ready in 20 seconds is marked healthy in 20 seconds. Setting
+      # it generously costs nothing and setting it tightly costs a lot.
+      #
+      # 60s was the monolith's value and it is not enough for five. `docker compose up` starts all
+      # five cold JVMs at once - five Spring contexts, five Flyway runs, five Hibernate bootstraps
+      # competing for the same cores - and on a contended 3.8 GB VM catalog-service was measured
+      # taking 195 seconds to print "Started". With a 60s start_period plus five 10s retries, compose
+      # declared it unhealthy at 110s and aborted the whole `up` with "dependency failed to start" -
+      # for a service that was working perfectly and simply had not finished yet.
+      start_period: 180s
 
     restart: unless-stopped
 
@@ -286,9 +330,20 @@ services:
     deploy:
       resources:
         limits:
-          # Six JVMs on one Docker VM. Without a limit each one sizes its heap against the whole
-          # machine, which is how Phase 17's stack ended up thrashing at 428% CPU on an idle broker.
-          memory: 384M
+          # 320 MB, and the number was measured rather than guessed.
+          #
+          # Six JVMs on one Docker VM. The first version of this file gave each service 384 MB and
+          # Kafka 1 GB, which totals 3.4 GB before postgres, redis and Docker's own overhead - on a
+          # 3.8 GB VM. The stack came up, reported healthy, and then fell over under the first real
+          # request: the broker could not answer its own 2-second heartbeat, fenced itself, and the
+          # CPU storm that followed pushed catalog-service past order-service's 5-second read
+          # timeout. A checkout failed with "Read timed out" pointing at a service that was perfectly
+          # healthy.
+          #
+          # These services idle at 90-210 MB with -XX:MaxRAMPercentage=75, so 320 MB is roughly
+          # double what they use and the total now leaves 1.4 GB of headroom. Phase 17 learned this
+          # lesson with four JVMs; six is where it stops being a warning.
+          memory: 320M
 
     healthcheck:
       # The readiness probe: does this service consider itself able to take traffic? It includes the
@@ -300,8 +355,19 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-      # Generous: a cold JVM plus Flyway migrations on a new database.
-      start_period: 60s
+      # Three minutes, and it needs to be.
+      #
+      # start_period is a grace window, not a delay: failures inside it do not count against
+      # `retries`, and a service that is ready in 20 seconds is marked healthy in 20 seconds. Setting
+      # it generously costs nothing and setting it tightly costs a lot.
+      #
+      # 60s was the monolith's value and it is not enough for five. `docker compose up` starts all
+      # five cold JVMs at once - five Spring contexts, five Flyway runs, five Hibernate bootstraps
+      # competing for the same cores - and on a contended 3.8 GB VM catalog-service was measured
+      # taking 195 seconds to print "Started". With a 60s start_period plus five 10s retries, compose
+      # declared it unhealthy at 110s and aborted the whole `up` with "dependency failed to start" -
+      # for a service that was working perfectly and simply had not finished yet.
+      start_period: 180s
 
     restart: unless-stopped
 
@@ -323,15 +389,26 @@ services:
         # order whose event goes nowhere. Waiting for healthy rather than started is what makes the
         # first order after `up` behave like the hundredth.
         condition: service_healthy
+      # service_started, NOT service_healthy - and the difference is the whole argument.
+      #
+      # Checkout cannot price a cart without catalog-service, so the instinct is to wait for it. But
+      # depends_on only orders STARTUP: it does nothing at runtime, and if catalog-service falls over
+      # an hour later order-service keeps running and checkouts fail with a 409 that says so. The
+      # runtime dependency is handled in code - timeouts, translated errors, a compensating release -
+      # and that handling is what actually matters.
+      #
+      # What waiting for `healthy` buys is that the FIRST checkout after `up` cannot fail. What it
+      # costs is that startup becomes serial: five cold JVMs on a contended VM, each waiting for the
+      # last, and `up` aborts entirely if any one of them is slow. Measured here, that was the
+      # difference between a stack that starts and one that reports "dependency failed to start" for
+      # a service that was working perfectly and had simply not finished yet.
+      #
+      # Depending on `started` is the honest expression of the design: this service is built to
+      # tolerate its neighbours being absent, so it should not refuse to boot without them.
       catalog-service:
-        # A hard dependency: checkout cannot price a cart without it.
-        #
-        # depends_on only orders STARTUP. It does nothing at runtime - if catalog-service falls over
-        # an hour later, order-service keeps running and checkouts fail with a 409 that says so.
-        # Startup ordering is the easy half of a dependency; the hard half is in the code.
-        condition: service_healthy
+        condition: service_started
       inventory-service:
-        condition: service_healthy
+        condition: service_started
 
     environment:
       # postgres, not localhost.
@@ -373,9 +450,10 @@ services:
     deploy:
       resources:
         limits:
-          # Six JVMs on one Docker VM. Without a limit each one sizes its heap against the whole
-          # machine, which is how Phase 17's stack ended up thrashing at 428% CPU on an idle broker.
-          memory: 448M
+          # A little more than the others: this is the only service that makes outbound HTTP calls,
+          # so it carries a connection pool and the JSON of whatever its neighbours returned. See any
+          # other service for why these numbers are as small as they are.
+          memory: 384M
 
     healthcheck:
       # The readiness probe: does this service consider itself able to take traffic? It includes the
@@ -387,8 +465,19 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-      # Generous: a cold JVM plus Flyway migrations on a new database.
-      start_period: 60s
+      # Three minutes, and it needs to be.
+      #
+      # start_period is a grace window, not a delay: failures inside it do not count against
+      # `retries`, and a service that is ready in 20 seconds is marked healthy in 20 seconds. Setting
+      # it generously costs nothing and setting it tightly costs a lot.
+      #
+      # 60s was the monolith's value and it is not enough for five. `docker compose up` starts all
+      # five cold JVMs at once - five Spring contexts, five Flyway runs, five Hibernate bootstraps
+      # competing for the same cores - and on a contended 3.8 GB VM catalog-service was measured
+      # taking 195 seconds to print "Started". With a 60s start_period plus five 10s retries, compose
+      # declared it unhealthy at 110s and aborted the whole `up` with "dependency failed to start" -
+      # for a service that was working perfectly and simply had not finished yet.
+      start_period: 180s
 
     restart: unless-stopped
 
@@ -445,9 +534,20 @@ services:
     deploy:
       resources:
         limits:
-          # Six JVMs on one Docker VM. Without a limit each one sizes its heap against the whole
-          # machine, which is how Phase 17's stack ended up thrashing at 428% CPU on an idle broker.
-          memory: 384M
+          # 320 MB, and the number was measured rather than guessed.
+          #
+          # Six JVMs on one Docker VM. The first version of this file gave each service 384 MB and
+          # Kafka 1 GB, which totals 3.4 GB before postgres, redis and Docker's own overhead - on a
+          # 3.8 GB VM. The stack came up, reported healthy, and then fell over under the first real
+          # request: the broker could not answer its own 2-second heartbeat, fenced itself, and the
+          # CPU storm that followed pushed catalog-service past order-service's 5-second read
+          # timeout. A checkout failed with "Read timed out" pointing at a service that was perfectly
+          # healthy.
+          #
+          # These services idle at 90-210 MB with -XX:MaxRAMPercentage=75, so 320 MB is roughly
+          # double what they use and the total now leaves 1.4 GB of headroom. Phase 17 learned this
+          # lesson with four JVMs; six is where it stops being a warning.
+          memory: 320M
 
     healthcheck:
       # The readiness probe: does this service consider itself able to take traffic? It includes the
@@ -459,8 +559,19 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-      # Generous: a cold JVM plus Flyway migrations on a new database.
-      start_period: 60s
+      # Three minutes, and it needs to be.
+      #
+      # start_period is a grace window, not a delay: failures inside it do not count against
+      # `retries`, and a service that is ready in 20 seconds is marked healthy in 20 seconds. Setting
+      # it generously costs nothing and setting it tightly costs a lot.
+      #
+      # 60s was the monolith's value and it is not enough for five. `docker compose up` starts all
+      # five cold JVMs at once - five Spring contexts, five Flyway runs, five Hibernate bootstraps
+      # competing for the same cores - and on a contended 3.8 GB VM catalog-service was measured
+      # taking 195 seconds to print "Started". With a 60s start_period plus five 10s retries, compose
+      # declared it unhealthy at 110s and aborted the whole `up` with "dependency failed to start" -
+      # for a service that was working perfectly and simply had not finished yet.
+      start_period: 180s
 
     restart: unless-stopped
 
@@ -629,15 +740,18 @@ services:
       # presents as a broker pinned at 400% CPU with an empty topic, which looks like anything but a
       # memory problem.
       #
-      # 512m is generous for a single broker holding a few thousand small records; Kafka does its
-      # real work in the page cache, which is off-heap.
-      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
+      # 320m, down from 512m in Phase 17, because there are now five application JVMs beside it
+      # rather than one. Kafka does its real work in the page cache, which is off-heap, so a single
+      # broker holding a few thousand small records is not short of heap at this size - and an -Xms
+      # equal to -Xmx commits the whole amount immediately, which is memory taken from everything
+      # else whether the broker needs it or not.
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx320m
 
     # Room for the heap above plus the JVM's own overhead and page cache.
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 640M
 
     volumes:
       # The commit log - the messages themselves, the consumer offsets, and the KRaft metadata.
@@ -661,8 +775,14 @@ services:
       interval: 10s
       timeout: 10s
       retries: 10
-      # Formatting the log directory on a first start, plus a JVM.
-      start_period: 30s
+      # Formatting the log directory on a first start, plus a JVM - and, on a restart, loading all
+      # 50 __consumer_offsets partitions before the broker will answer.
+      #
+      # 30s was enough when the broker had the machine mostly to itself. With five application JVMs
+      # starting beside it, that load was measured taking well over a minute, and compose aborted
+      # the entire `up` with "dependency failed to start" for a broker that was working through its
+      # log exactly as designed.
+      start_period: 150s
 
     restart: unless-stopped
 

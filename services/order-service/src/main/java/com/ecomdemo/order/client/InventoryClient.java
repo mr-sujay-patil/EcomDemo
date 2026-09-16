@@ -1,5 +1,6 @@
 package com.ecomdemo.order.client;
 
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.service.annotation.HttpExchange;
 import org.springframework.web.service.annotation.PostExchange;
 
@@ -14,13 +15,17 @@ import org.springframework.web.service.annotation.PostExchange;
  *
  * <p>A 409 from either method is a normal outcome, not an error to be logged and swallowed: it means
  * the shopper's cart no longer matches what is available, and the shopper needs to be told.
+ *
+ * <p>Note {@code @RequestBody} on both parameters. An HTTP service interface resolves nothing by
+ * convention - an unannotated parameter fails at call time with "No suitable resolver", not at
+ * startup - so the annotation is load-bearing rather than decorative.
  */
 @HttpExchange("/api/stock")
 public interface InventoryClient {
 
     /** Takes the units out, all of them or none. 409 if there are not enough. */
     @PostExchange("/reservations")
-    void reserve(ReservationRequest request);
+    void reserve(@RequestBody ReservationRequest request);
 
     /**
      * Puts them back, for a checkout that reserved stock and then could not save its order.
@@ -35,5 +40,5 @@ public interface InventoryClient {
      * created it still being alive. That is the saga pattern, and it is Phase 24.
      */
     @PostExchange("/releases")
-    void release(ReservationRequest request);
+    void release(@RequestBody ReservationRequest request);
 }

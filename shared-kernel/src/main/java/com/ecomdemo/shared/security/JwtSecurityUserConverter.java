@@ -2,7 +2,6 @@ package com.ecomdemo.shared.security;
 
 import org.springframework.core.convert.converter.Converter;
 import org.springframework.security.authentication.AbstractAuthenticationToken;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.oauth2.jwt.Jwt;
 
 /**
@@ -35,9 +34,14 @@ public class JwtSecurityUserConverter implements Converter<Jwt, AbstractAuthenti
                 jwt.getClaimAsString("email"),
                 Role.valueOf(jwt.getClaimAsString("role")));
 
-        // The token itself is kept as the credentials - it is what was presented, and it stays
-        // available to anything that wants to inspect a raw claim.
-        return UsernamePasswordAuthenticationToken.authenticated(
-                principal, jwt, principal.getAuthorities());
+        // The token itself is kept as the credentials - it is what was presented, and order-service
+        // reads it back to forward the caller's identity to catalog-service and inventory-service.
+        //
+        // SecurityUserAuthentication rather than UsernamePasswordAuthenticationToken, and the choice
+        // is load-bearing: that class nulls its credentials in eraseCredentials(), which
+        // ProviderManager calls on every successful authentication. The token was being destroyed
+        // microseconds after being attached. See SecurityUserAuthentication for why a bearer token
+        // and a password want opposite treatment here.
+        return new SecurityUserAuthentication(principal, jwt, principal.getAuthorities());
     }
 }
