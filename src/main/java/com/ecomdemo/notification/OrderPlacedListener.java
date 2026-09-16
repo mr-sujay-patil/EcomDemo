@@ -78,9 +78,10 @@ public class OrderPlacedListener {
             // OrderService. Every example written before that uses @Backoff from
             // org.springframework.retry.annotation, which is no longer on the classpath.
             backOff = @BackOff(delay = 1000, multiplier = 2.0),
-            // One retry topic shared by both attempts rather than -retry-0 and -retry-1. Fewer
-            // topics to look at, at the cost of not being able to tell at a glance which attempt a
-            // record is on.
+            // One retry topic per attempt: orders.placed-retry-0 and orders.placed-retry-1. The
+            // alternative, SUFFIX_WITH_DELAY_VALUE, names them after the backoff instead
+            // (-retry-1000, -retry-2000), which reads oddly when the delays are computed. The index
+            // makes "how far has this record got?" answerable by looking at which topic it is in.
             topicSuffixingStrategy = TopicSuffixingStrategy.SUFFIX_WITH_INDEX_VALUE,
             retryTopicSuffix = "-retry",
             dltTopicSuffix = "-dlt")

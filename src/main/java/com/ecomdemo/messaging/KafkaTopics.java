@@ -18,13 +18,17 @@ public final class KafkaTopics {
     public static final String ORDERS_PLACED = "orders.placed";
 
     /**
-     * Where {@code @RetryableTopic} parks a record it could not handle.
+     * Where {@code @RetryableTopic} parks a record it could not handle on its way to the DLT.
      *
-     * <p>Spring derives these names from the main topic plus a suffix, so they are written out here
-     * only for the tests and the documentation to refer to - nothing configures them from these
-     * constants.
+     * <p>One per attempt - {@code -retry-0} then {@code -retry-1} - because the listener suffixes
+     * with the attempt index. Spring derives these names itself from the main topic plus the
+     * configured suffix, so these constants exist only for the tests and the documentation to refer
+     * to; nothing is configured from them.
      */
-    public static final String ORDERS_PLACED_RETRY = ORDERS_PLACED + "-retry";
+    public static final String ORDERS_PLACED_RETRY_0 = ORDERS_PLACED + "-retry-0";
+
+    /** The second and last retry attempt. */
+    public static final String ORDERS_PLACED_RETRY_1 = ORDERS_PLACED + "-retry-1";
 
     /** The dead-letter topic: records that exhausted their retries, or that were never valid. */
     public static final String ORDERS_PLACED_DLT = ORDERS_PLACED + "-dlt";

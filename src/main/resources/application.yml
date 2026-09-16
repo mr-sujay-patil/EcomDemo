@@ -41,7 +41,18 @@ spring:
 
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      # JacksonJsonSerializer, not JsonSerializer.
+      #
+      # Spring Kafka 4.1 ships both, and the difference is which Jackson they use: JsonSerializer is
+      # the Jackson 2 one (com.fasterxml.jackson), Jackson* is the Jackson 3 one (tools.jackson) that
+      # Spring Boot 4 standardised on. It matters immediately - Jackson 2 refuses to serialize
+      # java.time.Instant without the JSR-310 module registered, and OrderPlacedEvent.placedAt is an
+      # Instant, so the older pair fails at the first checkout with "Java 8 date/time type not
+      # supported by default". Jackson 3 handles it out of the box.
+      #
+      # Same trap as tools.jackson vs com.fasterxml.jackson in the test sources: every example
+      # written before Boot 4 names the class that no longer works here.
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
 
       # Wait for the leader AND every in-sync replica to have written the record before calling the
       # send successful.
@@ -106,7 +117,7 @@ spring:
 
       properties:
         spring.deserializer.key.delegate.class: org.apache.kafka.common.serialization.StringDeserializer
-        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
 
         # The producer writes a __TypeId__ header naming the class it serialised. Trusting every
         # package would let whoever can write to the topic name any class on the classpath and have
