@@ -7,6 +7,7 @@ import java.time.ZoneOffset;
 
 import com.ecomdemo.cart.Cart;
 import com.ecomdemo.cart.CartService;
+import com.ecomdemo.customer.CustomerService;
 import com.ecomdemo.common.ConflictException;
 import com.ecomdemo.order.dto.OrderItemResponse;
 import com.ecomdemo.order.dto.OrderResponse;
@@ -55,9 +56,15 @@ class OrderPlacementTest {
     private CartService cartService;
 
     @Mock
+    private CustomerService customerService;
+
+    @Mock
     private OrderAuditService orderAuditService;
 
     private OrderPlacement orderPlacement;
+
+    /** The signed-in shopper these tests act as. */
+    private static final Long CUSTOMER_ID = 42L;
 
     private Cart cart;
     private Product keyboard;
@@ -65,15 +72,15 @@ class OrderPlacementTest {
 
     @BeforeEach
     void setUp() {
-        orderPlacement = new OrderPlacement(
-                orderRepository, cartService, orderAuditService, Clock.fixed(NOW, ZoneOffset.UTC));
-        cart = new Cart(Cart.SHARED_CART_ID);
+        orderPlacement = new OrderPlacement(orderRepository, cartService, customerService,
+                orderAuditService, Clock.fixed(NOW, ZoneOffset.UTC));
+        cart = new Cart(TestFixtures.customer(CUSTOMER_ID));
         keyboard = TestFixtures.product(1L, "Mechanical Keyboard", "129.99", 40);
         monitor = TestFixtures.product(3L, "27\" 4K Monitor", "399.00", 15);
     }
 
     private void cartIsReturned() {
-        given(cartService.requireCart()).willReturn(cart);
+        given(cartService.requireCart(CUSTOMER_ID)).willReturn(cart);
     }
 
     private void saveEchoesBackWithId(long id) {
@@ -93,7 +100,7 @@ class OrderPlacementTest {
             cart.addOrIncrease(monitor, 1);
 
             // WHEN
-            OrderResponse order = orderPlacement.placeOnce();
+            OrderResponse order = orderPlacement.placeOnce(CUSTOMER_ID);
 
             // THEN - the order reflects the cart
             assertThat(order.id()).isEqualTo(1L);
@@ -119,7 +126,7 @@ class OrderPlacementTest {
             cart.addOrIncrease(keyboard, 1);
 
             // WHEN
-            OrderResponse order = orderPlacement.placeOnce();
+            OrderResponse order = orderPlacement.placeOnce(CUSTOMER_ID);
             // ...and the catalogue is repriced afterwards
             keyboard.setPrice(new BigDecimal("999.99"));
             keyboard.setName("Renamed Keyboard");
@@ -135,7 +142,7 @@ class OrderPlacementTest {
             cartIsReturned();
 
             // WHEN / THEN
-            assertThatThrownBy(() -> orderPlacement.placeOnce())
+            assertThatThrownBy(() -> orderPlacement.placeOnce(CUSTOMER_ID))
                     .isInstanceOf(ConflictException.class)
                     .hasMessage("Cannot place an order: the cart is empty");
             verify(orderRepository, never()).save(any());
@@ -151,7 +158,7 @@ class OrderPlacementTest {
             monitor.setStockQuantity(0);
 
             // WHEN / THEN
-            assertThatThrownBy(() -> orderPlacement.placeOnce())
+            assertThatThrownBy(() -> orderPlacement.placeOnce(CUSTOMER_ID))
                     .isInstanceOf(ConflictException.class)
                     .hasMessageContaining("27\" 4K Monitor")
                     .hasMessageContaining("Only 0 unit(s)");
@@ -171,7 +178,7 @@ class OrderPlacementTest {
             cart.addOrIncrease(keyboard, 40);
 
             // WHEN
-            orderPlacement.placeOnce();
+            orderPlacement.placeOnce(CUSTOMER_ID);
 
             // THEN - "enough stock" is >=, not >
             assertThat(keyboard.getStockQuantity()).isZero();
@@ -190,7 +197,7 @@ class OrderPlacementTest {
             cart.addOrIncrease(keyboard, 1);
 
             // WHEN
-            orderPlacement.placeOnce();
+            orderPlacement.placeOnce(CUSTOMER_ID);
 
             // THEN the audit names the order it describes
             verify(orderAuditService).record(eq(OrderAudit.Outcome.PLACED), any(), eq(7L));
@@ -202,7 +209,7 @@ class OrderPlacementTest {
             cartIsReturned();
 
             // WHEN / THEN
-            assertThatThrownBy(() -> orderPlacement.placeOnce()).isInstanceOf(ConflictException.class);
+            assertThatThrownBy(() -> orderPlacement.placeOnce(CUSTOMER_ID)).isInstanceOf(ConflictException.class);
 
             // AND the attempt is recorded even though the transaction around it will roll back -
             // which is exactly what REQUIRES_NEW on the audit service is for.
@@ -217,7 +224,7 @@ class OrderPlacementTest {
             monitor.setStockQuantity(0);
 
             // WHEN / THEN
-            assertThatThrownBy(() -> orderPlacement.placeOnce()).isInstanceOf(ConflictException.class);
+            assertThatThrownBy(() -> orderPlacement.placeOnce(CUSTOMER_ID)).isInstanceOf(ConflictException.class);
             verify(orderAuditService).record(eq(OrderAudit.Outcome.INSUFFICIENT_STOCK), any(), eq(null));
         }
     }

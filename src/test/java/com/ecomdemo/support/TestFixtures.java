@@ -2,7 +2,9 @@ package com.ecomdemo.support;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Instant;
 
+import com.ecomdemo.customer.Customer;
 import com.ecomdemo.product.Product;
 
 import org.springframework.test.util.ReflectionTestUtils;
@@ -44,6 +46,16 @@ public final class TestFixtures {
     public static <T> T withId(T entity, Long id) {
         ReflectionTestUtils.setField(entity, "id", id);
         return entity;
+    }
+
+    /** A customer with a known id, for wiring carts and orders to an owner. */
+    public static Customer customer(Long id, String email) {
+        return withId(new Customer(email, "irrelevant-hash", "Test Customer",
+                Customer.Role.CUSTOMER, Instant.parse("2026-01-01T00:00:00Z")), id);
+    }
+
+    public static Customer customer(Long id) {
+        return customer(id, "customer" + id + "@ecomdemo.local");
     }
 
     public static BigDecimal money(String amount) {

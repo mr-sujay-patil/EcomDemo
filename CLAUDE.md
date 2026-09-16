@@ -26,6 +26,7 @@ later one.
 | Build | Maven, via the committed wrapper — always `./mvnw`, never a system `mvn` |
 | Database | PostgreSQL 16+ when the app runs (`dev` profile); H2 in-memory when the tests run (`test` profile) |
 | Schema | Owned by Flyway (`src/main/resources/db/migration`). Hibernate only validates |
+| Security | Spring Security, HTTP Basic, stateless. Roles `CUSTOMER` and `ADMIN` |
 
 ## Build commands
 
@@ -195,6 +196,43 @@ query needs an association, load it with `left join fetch` rather than relying o
 
 **Comments explain *why*, not *what*.** The code says what it does; a comment earns its place by
 recording a trade-off or a non-obvious constraint.
+
+## Security
+
+**Every endpoint is denied by default.** `WebSecurityConfiguration` lists what is public; adding an
+endpoint cannot accidentally publish it. Rules are matched in order, so the specific ones come first.
+
+**Controllers take the principal, services take an id.** `@AuthenticationPrincipal SecurityUser` in
+the controller, a `Long customerId` parameter into the service. Never read `SecurityContextHolder`
+inside a service — it makes the service silently require a logged-in user and untestable without a
+security context, the same way reading `HttpServletRequest` there would.
+
+**Scope the query, don't filter afterwards.** A customer's data is fetched with the owner in the
+WHERE clause (`findByIdAndCustomerWithItems`), so another customer's row is never loaded. Asking for
+someone else's resource returns **404, not 403** — 403 confirms it exists, which turns sequential ids
+into an enumeration tool. `@PreAuthorize("#customerId == authentication.principal.id")` goes on top
+as a second line of defence.
+
+**The security layer and the entity layer stay apart.** `SecurityUser` adapts `Customer` to
+`UserDetails` and carries the id; the entity implements no framework interfaces, and the `ROLE_`
+prefix is added in code rather than stored in the database.
+
+**Passwords are hashed with the injected `PasswordEncoder`, never compared directly.** The algorithm
+is chosen in one place. Test it with a real encoder, not a mock — a mock lets "it is hashed" pass
+even if the hash is the password.
+
+**Testing security:**
+
+- `@WithMockUser(roles = "ADMIN")` when only the role matters; `@WithMockCustomer(id = …)` when the
+  controller needs a customer id from the principal.
+- A `@WebMvcTest` must `@Import({WebSecurityConfiguration.class, ApiErrorResponder.class,
+  SecurityMockMvcCustomizer.class})` — a slice loads controllers, not `@Configuration`, so without it
+  the real rules never load and `@AuthenticationPrincipal` is not even resolved.
+- `SecurityMockMvcCustomizer` applies `springSecurity()` to the MockMvc builder. The chain is
+  stateless, so without it the test's `SecurityContext` is discarded per request and every
+  authenticated test returns 401.
+- Tests calling services directly need `TestSecurity.actAs(...)` for `@PreAuthorize` to evaluate —
+  including inside any worker thread, since `SecurityContextHolder` is thread-local.
 
 ## Transactions and concurrency
 

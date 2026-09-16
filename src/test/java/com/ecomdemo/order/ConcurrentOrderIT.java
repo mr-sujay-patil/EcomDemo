@@ -15,9 +15,14 @@ import com.ecomdemo.cart.CartService;
 import com.ecomdemo.cart.dto.CartItemResponse;
 import com.ecomdemo.product.ProductService;
 import com.ecomdemo.product.dto.ProductRequest;
+import com.ecomdemo.customer.CustomerService;
+import com.ecomdemo.customer.dto.RegisterRequest;
 import com.ecomdemo.product.dto.ProductResponse;
+import com.ecomdemo.support.TestSecurity;
 import com.ecomdemo.support.AbstractPostgresIT;
 
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -55,6 +60,28 @@ class ConcurrentOrderIT extends AbstractPostgresIT {
     private OrderService orderService;
 
     @Autowired
+    private CustomerService customerService;
+
+    /** The signed-in shopper these tests act as, registered once per test. */
+    private Long customerId;
+
+    @BeforeEach
+    void registerAndAuthenticate() {
+        customerId = customerService.register(new RegisterRequest(
+                "race-" + System.nanoTime() + "@ecomdemo.local", "password123", "Test Shopper")).id();
+        // The @PreAuthorize on OrderService compares against authentication.principal.id, so these
+        // direct service calls need a principal even though no HTTP request is involved.
+        TestSecurity.actAs(customerId, "irrelevant@ecomdemo.local");
+    }
+
+    @AfterEach
+    void clearAuthentication() {
+        // SecurityContextHolder is thread-local and JUnit reuses the thread for the next test.
+        TestSecurity.clear();
+    }
+
+
+    @Autowired
     private ProductService productService;
 
     @Autowired
@@ -75,7 +102,7 @@ class ConcurrentOrderIT extends AbstractPostgresIT {
             emptyTheCart();
             ProductResponse lastUnit = productService.create(new ProductRequest(
                     "Last Unit " + System.nanoTime(), "One in stock", new BigDecimal("10.00"), 1, null));
-            cartService.addItem(new AddCartItemRequest(lastUnit.id(), 1));
+            cartService.addItem(customerId, new AddCartItemRequest(lastUnit.id(), 1));
 
             long ordersBefore = orderRepository.count();
 
@@ -95,7 +122,7 @@ class ConcurrentOrderIT extends AbstractPostgresIT {
                     .isZero();
 
             // AND the cart is empty - the winner consumed it
-            assertThat(cartService.getCart().items()).isEmpty();
+            assertThat(cartService.getCart(customerId).items()).isEmpty();
 
             // Count the conflicts from the audit trail, not from the exception the caller saw.
             // A thread whose write is rejected by the version check is retried by @Retryable, and
@@ -122,12 +149,20 @@ class ConcurrentOrderIT extends AbstractPostgresIT {
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             Callable<Attempt> checkout = () -> {
+                // SecurityContextHolder is thread-local, and these are pool threads: the
+                // authentication established in @BeforeEach exists only on the main thread. Without
+                // this, @PreAuthorize refuses both attempts and the race never happens - the test
+                // would fail with "expected 1 success but was 0", which looks nothing like the
+                // threading problem it is. In production the filter chain does this per request.
+                TestSecurity.actAs(customerId, "race@ecomdemo.local");
                 startLine.await(10, TimeUnit.SECONDS);
                 try {
-                    orderService.placeOrder();
+                    orderService.placeOrder(customerId);
                     return new Attempt(true, null);
                 } catch (RuntimeException ex) {
                     return new Attempt(false, ex);
+                } finally {
+                    TestSecurity.clear();
                 }
             };
 
@@ -143,8 +178,8 @@ class ConcurrentOrderIT extends AbstractPostgresIT {
     }
 
     private void emptyTheCart() {
-        for (CartItemResponse item : cartService.getCart().items()) {
-            cartService.removeItem(item.productId());
+        for (CartItemResponse item : cartService.getCart(customerId).items()) {
+            cartService.removeItem(customerId, item.productId());
         }
     }
 

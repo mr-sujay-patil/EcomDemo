@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
+import com.ecomdemo.customer.Customer;
 import com.ecomdemo.product.Product;
 
 import jakarta.persistence.EntityManager;
@@ -39,28 +40,33 @@ class OrderRepositoryTest {
     private EntityManager entityManager;
 
     private Product keyboard;
+    private Customer owner;
 
     @BeforeEach
-    void seedAProduct() {
+    void seedAProductAndAnOwner() {
         keyboard = entityManager.merge(
                 new Product("Test Keyboard", "For the test", new BigDecimal("129.99"), 40));
+        // Orders belong to somebody from Phase 8 on, and every query here is scoped to that somebody.
+        owner = entityManager.merge(new Customer(
+                "order-repo-test@ecomdemo.local", "irrelevant-hash", "Repo Test",
+                Customer.Role.CUSTOMER, Instant.parse("2026-01-01T00:00:00Z")));
     }
 
     private Order saveOrder(Instant placedAt, int quantity) {
-        Order order = new Order(placedAt);
+        Order order = new Order(owner, placedAt);
         order.addItem(new OrderItem(order, keyboard, quantity));
         return orderRepository.save(order);
     }
 
     @Test
-    void findByIdWithItems_whenTheOrderExists_returnsItWithItemsAlreadyInitialised() {
+    void findByIdAndCustomerWithItems_whenTheOrderExists_returnsItWithItemsAlreadyInitialised() {
         // GIVEN
         Long id = saveOrder(LATER, 2).getId();
         entityManager.flush();
         entityManager.clear();   // detach, so a broken join fetch cannot be masked by the cache
 
         // WHEN
-        Optional<Order> found = orderRepository.findByIdWithItems(id);
+        Optional<Order> found = orderRepository.findByIdAndCustomerWithItems(id, owner.getId());
 
         // THEN
         assertThat(found).isPresent();
@@ -76,9 +82,9 @@ class OrderRepositoryTest {
     }
 
     @Test
-    void findByIdWithItems_whenTheOrderDoesNotExist_returnsEmpty() {
+    void findByIdAndCustomerWithItems_whenTheOrderDoesNotExist_returnsEmpty() {
         // WHEN / THEN
-        assertThat(orderRepository.findByIdWithItems(9999L)).isEmpty();
+        assertThat(orderRepository.findByIdAndCustomerWithItems(9999L, owner.getId())).isEmpty();
     }
 
     @Test
@@ -90,7 +96,7 @@ class OrderRepositoryTest {
         entityManager.clear();
 
         // WHEN
-        List<Order> orders = orderRepository.findAllWithItems();
+        List<Order> orders = orderRepository.findAllByCustomerWithItems(owner.getId());
 
         // THEN - "order by o.placedAt desc" is doing the work, not chance
         assertThat(orders).hasSize(2);
@@ -99,8 +105,8 @@ class OrderRepositoryTest {
     }
 
     @Test
-    void findAllWithItems_whenThereAreNoOrders_returnsEmptyList() {
+    void findAllByCustomerWithItems_whenThereAreNoOrders_returnsEmptyList() {
         // WHEN / THEN
-        assertThat(orderRepository.findAllWithItems()).isEmpty();
+        assertThat(orderRepository.findAllByCustomerWithItems(owner.getId())).isEmpty();
     }
 }

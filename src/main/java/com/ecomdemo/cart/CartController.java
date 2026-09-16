@@ -1,10 +1,13 @@
 package com.ecomdemo.cart;
 
 import com.ecomdemo.cart.dto.AddCartItemRequest;
+import com.ecomdemo.customer.SecurityUser;
 import com.ecomdemo.cart.dto.CartResponse;
 import com.ecomdemo.cart.dto.UpdateCartItemRequest;
 
 import jakarta.validation.Valid;
+
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -30,23 +33,26 @@ public class CartController {
     }
 
     @GetMapping
-    public CartResponse view() {
-        return cartService.getCart();
+    public CartResponse view(@AuthenticationPrincipal SecurityUser principal) {
+        return cartService.getCart(principal.getId());
     }
 
     @PostMapping("/items")
-    public CartResponse addItem(@Valid @RequestBody AddCartItemRequest request) {
-        return cartService.addItem(request);
+    public CartResponse addItem(@AuthenticationPrincipal SecurityUser principal,
+                                @Valid @RequestBody AddCartItemRequest request) {
+        return cartService.addItem(principal.getId(), request);
     }
 
     @PutMapping("/items/{productId}")
-    public CartResponse updateItem(@PathVariable Long productId,
+    public CartResponse updateItem(@AuthenticationPrincipal SecurityUser principal,
+                                   @PathVariable Long productId,
                                    @Valid @RequestBody UpdateCartItemRequest request) {
-        return cartService.updateItemQuantity(productId, request);
+        return cartService.updateItemQuantity(principal.getId(), productId, request);
     }
 
     @DeleteMapping("/items/{productId}")
-    public CartResponse removeItem(@PathVariable Long productId) {
-        return cartService.removeItem(productId);
+    public CartResponse removeItem(@AuthenticationPrincipal SecurityUser principal,
+                                   @PathVariable Long productId) {
+        return cartService.removeItem(principal.getId(), productId);
     }
 }

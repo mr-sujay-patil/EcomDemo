@@ -5,6 +5,7 @@ import com.ecomdemo.cart.dto.CartResponse;
 import com.ecomdemo.cart.dto.UpdateCartItemRequest;
 import com.ecomdemo.common.ConflictException;
 import com.ecomdemo.common.NotFoundException;
+import com.ecomdemo.customer.CustomerService;
 import com.ecomdemo.product.Product;
 import com.ecomdemo.product.ProductService;
 
@@ -12,7 +13,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Owns the rules of the single shared cart.
+ * Owns the rules of a customer's cart.
  *
  * <p>Every method that reads the cart for rendering does so inside a transaction and maps to a
  * {@link CartResponse} before returning, because {@code open-in-view} is disabled - a lazy
@@ -25,19 +26,35 @@ public class CartService {
 
     private final CartRepository cartRepository;
     private final ProductService productService;
+    private final CustomerService customerService;
 
-    public CartService(CartRepository cartRepository, ProductService productService) {
+    public CartService(CartRepository cartRepository,
+                       ProductService productService,
+                       CustomerService customerService) {
         this.cartRepository = cartRepository;
         this.productService = productService;
+        this.customerService = customerService;
     }
 
-    public CartResponse getCart() {
-        return CartResponse.from(requireCart());
+    /**
+     * Reads the customer's cart without creating one.
+     *
+     * <p>This method runs in the class-level read-only transaction, so it must not write - and until
+     * Phase 8 it never did, because the single shared cart was seeded by a migration and always
+     * existed. Now that carts are per customer, the first {@code GET /api/cart} of a new account
+     * would have been an INSERT inside a read-only transaction: a 500, and only ever for brand new
+     * users. Returning an empty view instead keeps the read a read, and leaves no row behind for
+     * somebody who only looked.
+     */
+    public CartResponse getCart(Long customerId) {
+        return cartRepository.findByCustomerIdWithItems(customerId)
+                .map(CartResponse::from)
+                .orElseGet(CartResponse::empty);
     }
 
     @Transactional
-    public CartResponse addItem(AddCartItemRequest request) {
-        Cart cart = requireCart();
+    public CartResponse addItem(Long customerId, AddCartItemRequest request) {
+        Cart cart = requireCart(customerId);
         Product product = productService.requireEntity(request.productId());
 
         int alreadyInCart = cart.findItemFor(product.getId())
@@ -50,8 +67,8 @@ public class CartService {
     }
 
     @Transactional
-    public CartResponse updateItemQuantity(Long productId, UpdateCartItemRequest request) {
-        Cart cart = requireCart();
+    public CartResponse updateItemQuantity(Long customerId, Long productId, UpdateCartItemRequest request) {
+        Cart cart = requireCart(customerId);
         CartItem item = cart.findItemFor(productId)
                 .orElseThrow(() -> new NotFoundException("Product " + productId + " is not in the cart"));
 
@@ -61,8 +78,8 @@ public class CartService {
     }
 
     @Transactional
-    public CartResponse removeItem(Long productId) {
-        Cart cart = requireCart();
+    public CartResponse removeItem(Long customerId, Long productId) {
+        Cart cart = requireCart(customerId);
         CartItem item = cart.findItemFor(productId)
                 .orElseThrow(() -> new NotFoundException("Product " + productId + " is not in the cart"));
 
@@ -75,10 +92,16 @@ public class CartService {
      * transaction. Package-private access would be cleaner, but the order feature lives in a
      * different package, so this stays public and returns the entity rather than a DTO on purpose.
      */
-    public Cart requireCart() {
-        return cartRepository.findByIdWithItems(Cart.SHARED_CART_ID)
-                // data.sql seeds the shared cart; recreate it if someone wiped the table by hand.
-                .orElseGet(() -> cartRepository.save(new Cart(Cart.SHARED_CART_ID)));
+    /**
+     * The customer's cart, created if this is their first. Only ever called from a method that
+     * writes - the cart endpoints that mutate, and the checkout - so the insert is safe.
+     */
+    public Cart requireCart(Long customerId) {
+        return cartRepository.findByCustomerIdWithItems(customerId)
+                // A cart is created on first use rather than at registration: an account that never
+                // shops should not leave an empty row behind, and the unique constraint on
+                // customer_id means a race here fails loudly instead of creating two.
+                .orElseGet(() -> cartRepository.save(new Cart(customerService.requireEntity(customerId))));
     }
 
     private static void requireStock(Product product, int requestedQuantity) {

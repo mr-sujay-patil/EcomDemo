@@ -6,6 +6,7 @@ import com.ecomdemo.cart.dto.AddCartItemRequest;
 import com.ecomdemo.cart.dto.CartResponse;
 import com.ecomdemo.cart.dto.UpdateCartItemRequest;
 import com.ecomdemo.common.ConflictException;
+import com.ecomdemo.customer.CustomerService;
 import com.ecomdemo.common.NotFoundException;
 import com.ecomdemo.product.Product;
 import com.ecomdemo.product.ProductService;
@@ -43,46 +44,52 @@ class CartServiceTest {
     @Mock
     private ProductService productService;
 
+    @Mock
+    private CustomerService customerService;
+
     @InjectMocks
     private CartService cartService;
+
+    /** The signed-in shopper these tests act as. */
+    private static final Long CUSTOMER_ID = 42L;
 
     private Cart cart;
     private Product keyboard;
 
     @BeforeEach
     void setUp() {
-        cart = new Cart(Cart.SHARED_CART_ID);
+        cart = new Cart(TestFixtures.customer(CUSTOMER_ID));
         keyboard = TestFixtures.product(1L, "Mechanical Keyboard", "129.99", 40);
     }
 
     private void cartExists() {
-        given(cartRepository.findByIdWithItems(Cart.SHARED_CART_ID)).willReturn(Optional.of(cart));
+        given(cartRepository.findByCustomerIdWithItems(CUSTOMER_ID)).willReturn(Optional.of(cart));
     }
 
     @Nested
     class RequireCart {
 
         @Test
-        void requireCart_whenTheSharedCartExists_returnsItWithoutSaving() {
+        void requireCart_whenTheCustomerAlreadyHasACart_returnsItWithoutSaving() {
             // GIVEN
             cartExists();
 
             // WHEN / THEN
-            assertThat(cartService.requireCart()).isSameAs(cart);
+            assertThat(cartService.requireCart(CUSTOMER_ID)).isSameAs(cart);
             verify(cartRepository, never()).save(any());
         }
 
         @Test
-        void requireCart_whenTheRowIsMissing_createsTheSharedCart() {
-            // GIVEN - data.sql seeds it, but someone may have wiped the table by hand
-            given(cartRepository.findByIdWithItems(Cart.SHARED_CART_ID)).willReturn(Optional.empty());
+        void requireCart_whenTheCustomerHasNoCartYet_createsOneForThem() {
+            // GIVEN a shopper who has never added anything
+            given(cartRepository.findByCustomerIdWithItems(CUSTOMER_ID)).willReturn(Optional.empty());
+            given(customerService.requireEntity(CUSTOMER_ID))
+                    .willReturn(TestFixtures.customer(CUSTOMER_ID));
             given(cartRepository.save(any(Cart.class))).willAnswer(i -> i.getArgument(0));
 
-            // WHEN
-            Cart created = cartService.requireCart();
-
-            // THEN - recreated with the fixed id, not a new generated one
-            assertThat(created.getId()).isEqualTo(Cart.SHARED_CART_ID);
+            // THEN the cart is created on first use, owned by them and empty
+            Cart created = cartService.requireCart(CUSTOMER_ID);
+            assertThat(created.getCustomer().getId()).isEqualTo(CUSTOMER_ID);
             assertThat(created.isEmpty()).isTrue();
         }
     }
@@ -98,7 +105,7 @@ class CartServiceTest {
             cart.addOrIncrease(TestFixtures.product(2L, "Wireless Mouse", "49.50", 120), 1);
 
             // WHEN
-            CartResponse response = cartService.getCart();
+            CartResponse response = cartService.getCart(CUSTOMER_ID);
 
             // THEN
             assertThat(response.items()).hasSize(2);
@@ -112,7 +119,7 @@ class CartServiceTest {
             cartExists();
 
             // WHEN / THEN - an empty cart is a valid state, not an error
-            CartResponse response = cartService.getCart();
+            CartResponse response = cartService.getCart(CUSTOMER_ID);
             assertThat(response.items()).isEmpty();
             assertThat(response.total()).isEqualByComparingTo("0.00");
         }
@@ -128,7 +135,7 @@ class CartServiceTest {
             given(productService.requireEntity(1L)).willReturn(keyboard);
 
             // WHEN
-            CartResponse response = cartService.addItem(new AddCartItemRequest(1L, 2));
+            CartResponse response = cartService.addItem(CUSTOMER_ID, new AddCartItemRequest(1L, 2));
 
             // THEN
             assertThat(response.items()).singleElement().satisfies(item -> {
@@ -147,7 +154,7 @@ class CartServiceTest {
             cart.addOrIncrease(keyboard, 1);
 
             // WHEN
-            CartResponse response = cartService.addItem(new AddCartItemRequest(1L, 2));
+            CartResponse response = cartService.addItem(CUSTOMER_ID, new AddCartItemRequest(1L, 2));
 
             // THEN - one line of 3, not two lines
             assertThat(response.items()).hasSize(1);
@@ -162,7 +169,7 @@ class CartServiceTest {
                     .willThrow(new NotFoundException("Product 9999 not found"));
 
             // WHEN / THEN
-            assertThatThrownBy(() -> cartService.addItem(new AddCartItemRequest(9999L, 1)))
+            assertThatThrownBy(() -> cartService.addItem(CUSTOMER_ID, new AddCartItemRequest(9999L, 1)))
                     .isInstanceOf(NotFoundException.class)
                     .hasMessage("Product 9999 not found");
         }
@@ -174,7 +181,7 @@ class CartServiceTest {
             given(productService.requireEntity(1L)).willReturn(keyboard);
 
             // WHEN / THEN
-            assertThatThrownBy(() -> cartService.addItem(new AddCartItemRequest(1L, 41)))
+            assertThatThrownBy(() -> cartService.addItem(CUSTOMER_ID, new AddCartItemRequest(1L, 41)))
                     .isInstanceOf(ConflictException.class)
                     .hasMessageContaining("Only 40 unit(s)")
                     .hasMessageContaining("requested 41");
@@ -190,7 +197,7 @@ class CartServiceTest {
 
             // WHEN / THEN - adding 2 more asks for 41 in total, which is one too many.
             // Checking the request in isolation would have let this through.
-            assertThatThrownBy(() -> cartService.addItem(new AddCartItemRequest(1L, 2)))
+            assertThatThrownBy(() -> cartService.addItem(CUSTOMER_ID, new AddCartItemRequest(1L, 2)))
                     .isInstanceOf(ConflictException.class)
                     .hasMessageContaining("requested 41");
             assertThat(cart.getItems().getFirst().getQuantity()).isEqualTo(39);
@@ -207,7 +214,7 @@ class CartServiceTest {
             cart.addOrIncrease(keyboard, 2);
 
             // WHEN
-            CartResponse response = cartService.updateItemQuantity(1L, new UpdateCartItemRequest(5));
+            CartResponse response = cartService.updateItemQuantity(CUSTOMER_ID, 1L, new UpdateCartItemRequest(5));
 
             // THEN - set, not incremented
             assertThat(response.items().getFirst().quantity()).isEqualTo(5);
@@ -220,7 +227,7 @@ class CartServiceTest {
             cartExists();
 
             // WHEN / THEN
-            assertThatThrownBy(() -> cartService.updateItemQuantity(1L, new UpdateCartItemRequest(3)))
+            assertThatThrownBy(() -> cartService.updateItemQuantity(CUSTOMER_ID, 1L, new UpdateCartItemRequest(3)))
                     .isInstanceOf(NotFoundException.class)
                     .hasMessage("Product 1 is not in the cart");
         }
@@ -232,7 +239,7 @@ class CartServiceTest {
             cart.addOrIncrease(keyboard, 2);
 
             // WHEN / THEN
-            assertThatThrownBy(() -> cartService.updateItemQuantity(1L, new UpdateCartItemRequest(999)))
+            assertThatThrownBy(() -> cartService.updateItemQuantity(CUSTOMER_ID, 1L, new UpdateCartItemRequest(999)))
                     .isInstanceOf(ConflictException.class)
                     .hasMessageContaining("Only 40 unit(s)");
             assertThat(cart.getItems().getFirst().getQuantity()).isEqualTo(2);
@@ -250,7 +257,7 @@ class CartServiceTest {
             cart.addOrIncrease(TestFixtures.product(2L, "Wireless Mouse", "49.50", 120), 1);
 
             // WHEN
-            CartResponse response = cartService.removeItem(1L);
+            CartResponse response = cartService.removeItem(CUSTOMER_ID, 1L);
 
             // THEN
             assertThat(response.items()).singleElement()
@@ -264,7 +271,7 @@ class CartServiceTest {
             cartExists();
 
             // WHEN / THEN
-            assertThatThrownBy(() -> cartService.removeItem(42L))
+            assertThatThrownBy(() -> cartService.removeItem(CUSTOMER_ID, 42L))
                     .isInstanceOf(NotFoundException.class)
                     .hasMessage("Product 42 is not in the cart");
         }

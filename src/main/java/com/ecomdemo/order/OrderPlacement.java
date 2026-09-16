@@ -6,6 +6,7 @@ import com.ecomdemo.cart.Cart;
 import com.ecomdemo.cart.CartItem;
 import com.ecomdemo.cart.CartService;
 import com.ecomdemo.common.ConflictException;
+import com.ecomdemo.customer.CustomerService;
 import com.ecomdemo.order.dto.OrderResponse;
 import com.ecomdemo.product.Product;
 
@@ -39,15 +40,18 @@ class OrderPlacement {
 
     private final OrderRepository orderRepository;
     private final CartService cartService;
+    private final CustomerService customerService;
     private final OrderAuditService orderAuditService;
     private final Clock clock;
 
     OrderPlacement(OrderRepository orderRepository,
                    CartService cartService,
+                   CustomerService customerService,
                    OrderAuditService orderAuditService,
                    Clock clock) {
         this.orderRepository = orderRepository;
         this.cartService = cartService;
+        this.customerService = customerService;
         this.orderAuditService = orderAuditService;
         this.clock = clock;
     }
@@ -59,8 +63,8 @@ class OrderPlacement {
      * survive the rollback that the exceptions below trigger.
      */
     @Transactional
-    public OrderResponse placeOnce() {
-        Cart cart = cartService.requireCart();
+    public OrderResponse placeOnce(Long customerId) {
+        Cart cart = cartService.requireCart(customerId);
         if (cart.isEmpty()) {
             String detail = "Cannot place an order: the cart is empty";
             orderAuditService.record(OrderAudit.Outcome.EMPTY_CART, detail, null);
@@ -81,7 +85,7 @@ class OrderPlacement {
         }
 
         // 2. Build the order, snapshotting name and price, and reduce stock.
-        Order order = new Order(clock.instant());
+        Order order = new Order(customerService.requireEntity(customerId), clock.instant());
         for (CartItem cartItem : cartItems) {
             Product product = cartItem.getProduct();
             product.reduceStock(cartItem.getQuantity());

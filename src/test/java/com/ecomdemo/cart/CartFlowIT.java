@@ -45,7 +45,7 @@ class CartFlowIT extends AbstractPostgresIT {
     }
 
     private ProductResponse newProduct(String name, String price, int stock) {
-        return client.post().uri("/api/products")
+        return admin.post().uri("/api/products")
                 .body(new ProductRequest(name, "for the cart IT", new BigDecimal(price), stock, null))
                 .exchange()
                 .expectStatus().isCreated()

@@ -7,6 +7,7 @@ import com.ecomdemo.order.dto.OrderResponse;
 
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.resilience.annotation.Retryable;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -63,18 +64,36 @@ public class OrderService {
     @Retryable(includes = OptimisticLockingFailureException.class, maxRetries = MAX_RETRIES,
             delay = 25, jitter = 25)
     @Transactional(propagation = Propagation.NEVER)
-    public OrderResponse placeOrder() {
-        return orderPlacement.placeOnce();
+    @PreAuthorize("#customerId == authentication.principal.id")
+    public OrderResponse placeOrder(Long customerId) {
+        return orderPlacement.placeOnce(customerId);
     }
 
-    public List<OrderResponse> findAll() {
-        return orderRepository.findAllWithItems().stream()
+    /**
+     * This customer's orders, newest first.
+     *
+     * <p>{@code @PreAuthorize} asserts that the id being asked about is the caller's own. The query
+     * is already scoped, so this is belt and braces - but it is the belt that survives a future
+     * controller passing the wrong id, and it fails before a single row is read rather than after.
+     */
+    @PreAuthorize("#customerId == authentication.principal.id")
+    public List<OrderResponse> findAll(Long customerId) {
+        return orderRepository.findAllByCustomerWithItems(customerId).stream()
                 .map(OrderResponse::from)
                 .toList();
     }
 
-    public OrderResponse findById(Long id) {
-        return orderRepository.findByIdWithItems(id)
+    /**
+     * One of this customer's orders.
+     *
+     * <p>Someone else's order id produces <strong>404, not 403</strong>. 403 would confirm that the
+     * order exists, which turns sequential ids into a way to count the shop's orders and probe for
+     * which ones are real. As far as this customer is concerned, an order that is not theirs does not
+     * exist - and the scoped query means the row is never even loaded.
+     */
+    @PreAuthorize("#customerId == authentication.principal.id")
+    public OrderResponse findById(Long id, Long customerId) {
+        return orderRepository.findByIdAndCustomerWithItems(id, customerId)
                 .map(OrderResponse::from)
                 .orElseThrow(() -> NotFoundException.of("Order", id));
     }

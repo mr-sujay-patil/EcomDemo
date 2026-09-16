@@ -3,6 +3,9 @@ package com.ecomdemo.support;
 import org.junit.jupiter.api.BeforeEach;
 
 import org.springframework.boot.test.context.SpringBootTest;
+import com.ecomdemo.customer.dto.CustomerResponse;
+import com.ecomdemo.customer.dto.RegisterRequest;
+
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.test.web.servlet.client.RestTestClient;
@@ -62,15 +65,65 @@ public abstract class AbstractPostgresIT {
     private int port;
 
     /**
-     * Bound to the real server rather than to MockMvc, so requests travel over a socket through the
-     * whole stack - Tomcat, Jackson, the filters, the controller advice.
+     * The seeded administrator's credentials, from V6. The password is documented in the README; it
+     * unlocks a throwaway container and nothing else.
+     */
+    private static final String ADMIN_EMAIL = "admin@ecomdemo.local";
+    private static final String ADMIN_PASSWORD = "admin123";
+    private static final String CUSTOMER_PASSWORD = "password123";
+
+    /**
+     * No credentials at all. Use it to assert that something is public - or that it is not.
+     */
+    protected RestTestClient anonymous;
+
+    /** Authenticated as the seeded ADMIN. The only client that may write to the catalogue. */
+    protected RestTestClient admin;
+
+    /**
+     * Authenticated as a CUSTOMER registered fresh for each test.
+     *
+     * <p>Fresh matters: carts and orders belong to a user now, and every integration test in the run
+     * shares one container. Reusing an account would mean one test's cart contents arriving in the
+     * next test's assertions.
      */
     protected RestTestClient client;
 
+    /** The id of that customer, for assertions that need to know whose data it is. */
+    protected Long customerId;
+
     @BeforeEach
-    void bindClientToRunningServer() {
-        client = RestTestClient.bindToServer()
-                .baseUrl("http://localhost:" + port)
-                .build();
+    void bindClientsToRunningServer() {
+        anonymous = clientFor(null, null);
+        admin = clientFor(ADMIN_EMAIL, ADMIN_PASSWORD);
+
+        // Registered through the public endpoint rather than inserted directly, so every integration
+        // test also exercises the registration path and the BCrypt hashing behind it.
+        String email = "it-" + System.nanoTime() + "@ecomdemo.local";
+        customerId = anonymous.post().uri("/api/customers/register")
+                .body(new RegisterRequest(email, CUSTOMER_PASSWORD, "Integration Test Shopper"))
+                .exchange()
+                .expectStatus().isCreated()
+                .expectBody(CustomerResponse.class)
+                .returnResult().getResponseBody()
+                .id();
+
+        client = clientFor(email, CUSTOMER_PASSWORD);
+    }
+
+    /**
+     * Bound to the real server rather than to MockMvc, so requests travel over a socket through the
+     * whole stack - Tomcat, the security filter chain, Jackson, the controller advice.
+     *
+     * <p>HTTP Basic credentials go on every request, which is exactly how the scheme works: there is
+     * no session, so each request proves who it is from scratch.
+     */
+    private RestTestClient clientFor(String email, String password) {
+        // var, because RestTestClient.Builder is self-referentially generic - naming the raw type
+        // erases it and the fluent methods stop resolving.
+        var builder = RestTestClient.bindToServer().baseUrl("http://localhost:" + port);
+        return email == null
+                ? builder.build()
+                : builder.defaultHeaders(headers -> headers.setBasicAuth(email, password)).build();
     }
 }
