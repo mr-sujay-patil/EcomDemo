@@ -1,4 +1,4 @@
-package com.ecomdemo.common;
+package com.ecomdemo.shared;
 
 import java.io.IOException;
 
@@ -13,7 +13,6 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.access.AccessDeniedHandler;
-import org.springframework.stereotype.Component;
 
 import tools.jackson.databind.ObjectMapper;
 
@@ -38,8 +37,11 @@ import tools.jackson.databind.ObjectMapper;
  *
  * <p>The messages are deliberately vague. "Bad credentials" without saying whether the email existed
  * is what stops this endpoint being used to enumerate registered users.
+ *
+ * <p>Registered by {@link com.ecomdemo.shared.autoconfigure.SharedKernelAutoConfiguration} rather
+ * than by {@code @Component}: this class lives in a library jar, and a library cannot assume it sits
+ * inside somebody else's component scan.
  */
-@Component
 public class ApiErrorResponder implements AuthenticationEntryPoint, AccessDeniedHandler {
 
     private static final Logger log = LoggerFactory.getLogger(ApiErrorResponder.class);

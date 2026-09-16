@@ -1,4 +1,4 @@
-package com.ecomdemo.common;
+package com.ecomdemo.shared;
 
 /**
  * Thrown when a request is well-formed but conflicts with the current state of the system - for
