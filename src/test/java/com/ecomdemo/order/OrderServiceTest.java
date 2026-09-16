@@ -9,6 +9,8 @@ import com.ecomdemo.order.dto.OrderResponse;
 import com.ecomdemo.product.Product;
 import com.ecomdemo.support.TestFixtures;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -46,7 +48,12 @@ class OrderServiceTest {
 
     @BeforeEach
     void setUp() {
-        orderService = new OrderService(orderRepository, orderPlacement);
+        // A real OrderMetrics over an in-memory registry rather than a mock: it is a value-like
+        // collaborator with no behaviour to arrange, and a mock here would only assert that this
+        // test knows which methods the production code calls. What the meters actually record is
+        // OrderMetricsTest's job.
+        orderService = new OrderService(orderRepository, orderPlacement,
+                new OrderMetrics(new SimpleMeterRegistry()));
     }
 
     private static final Instant NOW = Instant.parse("2026-09-16T10:15:30Z");

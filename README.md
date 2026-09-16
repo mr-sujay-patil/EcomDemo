@@ -1390,3 +1390,156 @@ every eviction is targeted.
   products, wrong for ten thousand.
 - No cache metrics — hit ratio is visible in logs only. Actuator and Micrometer arrive in Phase 15.
 - Redis holds no persistence on purpose: everything in it can be rebuilt from PostgreSQL.
+
+---
+
+## Phase 15 — Metrics & Monitoring
+
+**Added:** Spring Boot Actuator, Micrometer, and a Prometheus + Grafana stack in Compose. The
+application now reports on itself, and there is a dashboard that shows it.
+
+- **Four Actuator endpoints**, and only four: `health` (with **liveness** and **readiness** groups),
+  `info`, `metrics`, `prometheus`.
+- **Three business metrics**: `orders.placed` (counter), `order.value` (distribution summary),
+  `order.checkout` (timer, tagged by outcome).
+- **Prometheus** scraping every 10s, with **one alert rule** — 5xx above 5% for two minutes.
+- **Grafana**, fully provisioned from files: data source and dashboard come up with the stack.
+- The app's compose healthcheck now probes **readiness** instead of `GET /api/products`.
+
+### Start it
+
+```bash
+cp .env.example .env          # set POSTGRES_PASSWORD, JWT_SECRET and GRAFANA_PASSWORD
+docker compose up -d --build
+```
+
+| What | Where | Credentials |
+|---|---|---|
+| Application | http://localhost:8080 | — |
+| Prometheus | http://localhost:9090 | none |
+| Grafana | http://localhost:3000 | `admin` / your `GRAFANA_PASSWORD` |
+
+### See the dashboard move
+
+Open **http://localhost:3000** → *Dashboards* → *EcomDemo* → **EcomDemo Overview**, set the time
+range to *Last 15 minutes* and the refresh to *10s*. Then generate some traffic:
+
+```bash
+# 1. log in as the seeded shopper flow
+TOKEN=$(curl -s localhost:8080/api/customers/register \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"metrics@ecomdemo.local","password":"password123","displayName":"Metrics"}' >/dev/null;
+  curl -s localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"metrics@ecomdemo.local","password":"password123"}' | sed 's/.*"accessToken":"\([^"]*\)".*/\1/')
+
+# 2. place orders in a loop - watch "Orders per minute" and "Order value distribution"
+for i in $(seq 1 20); do
+  curl -s -X POST localhost:8080/api/cart/items -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' -d '{"productId":1,"quantity":1}' >/dev/null
+  curl -s -X POST localhost:8080/api/orders -H "Authorization: Bearer $TOKEN" >/dev/null
+  sleep 1
+done
+
+# 3. browse the catalogue, so the RED panels have something to draw
+for i in $(seq 1 100); do curl -s localhost:8080/api/products >/dev/null; done
+
+# 4. and some 404s, to show they do NOT count as errors on the alert
+for i in $(seq 1 20); do curl -s localhost:8080/api/products/999999 >/dev/null; done
+```
+
+Within a scrape interval, **Orders per minute** and **Checkout attempts by outcome** move, the RED
+panels fill in, and the error-rate stat stays green — a 404 is the application working correctly, and
+the alert counts only 5xx.
+
+### Look at the raw numbers
+
+```bash
+# what Prometheus actually scrapes
+curl -s localhost:8080/actuator/prometheus | grep -E '^orders_placed_total|^order_value_(count|sum)'
+# orders_placed_total{application="ecomdemo"} 20.0
+# order_value_count{application="ecomdemo"} 20.0
+# order_value_sum{application="ecomdemo"} 2599.8
+
+# is Prometheus finding the app?
+open http://localhost:9090/targets          # ecomdemo job should be UP
+
+# is the alert loaded?
+open http://localhost:9090/alerts           # HighServerErrorRate, Inactive
+```
+
+### Liveness vs readiness, demonstrated
+
+```bash
+curl -s localhost:8080/actuator/health/liveness    # {"status":"UP"}
+curl -s localhost:8080/actuator/health/readiness   # {"status":"UP"}
+
+# stop the database and ask again
+docker compose stop postgres
+curl -s localhost:8080/actuator/health/readiness   # {"status":"OUT_OF_SERVICE"} - stop sending traffic
+curl -s localhost:8080/actuator/health/liveness    # {"status":"UP"}  - the process is fine, do NOT restart it
+docker compose start postgres
+```
+
+That difference is the whole point. Restarting the application would not have fixed PostgreSQL, so
+liveness deliberately ignores it; a load balancer, on the other hand, should stop sending this
+instance traffic immediately, so readiness does not.
+
+### Health details are not public
+
+```bash
+curl -s localhost:8080/actuator/health
+# {"status":"UP"} - and nothing else
+
+TOKEN=$(curl -s localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"admin@ecomdemo.local","password":"admin123"}' | sed 's/.*"accessToken":"\([^"]*\)".*/\1/')
+curl -s localhost:8080/actuator/health -H "Authorization: Bearer $TOKEN"
+# {"status":"UP","components":{"db":{...},"redis":{...},"diskSpace":{...}}}
+
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/actuator/env   # 401 - not even exposed
+```
+
+### Tests
+
+| Test | Level | What it pins |
+|---|---|---|
+| `OrderMetricsTest` | unit | The meters record correctly — **and** the names they are scraped under |
+| `ActuatorEndpointsIT` | end-to-end | What is exposed, what is *not*, and who may read each |
+| `BusinessMetricsIT` | end-to-end | A real order moves all three meters; a refused one moves only the timer |
+| `MonitoringConfigurationTest` | configuration | Scrape target, rule file, dashboard queries, provisioning, no secrets |
+| `SecurityRulesTest` | web slice | The Actuator rows of the authorization matrix |
+
+```bash
+./mvnw test -Dtest='OrderMetricsTest,MonitoringConfigurationTest'   # no Docker needed
+./mvnw clean verify                                                  # everything, with containers
+```
+
+### Three things worth knowing
+
+**A lazily registered meter rates to zero.** Micrometer creates a meter on first use, so a timer
+registered inside the method it measures has *no series at all* until the first event. Prometheus
+then sees it appear already above zero, and `rate()` — which measures the increase between samples —
+reports nothing for the whole first window. `OrderMetrics` builds all three outcome timers in its
+constructor so each starts at 0. It is also what lets you tell "no conflicts happened" apart from
+"the conflict series does not exist", which look the same on a graph.
+
+**`.baseUnit("orders")` publishes `orders_placed_orders_total`.** Micrometer splices the base unit
+into the middle of the name. It is meant for bytes and seconds, where it disambiguates — a count of
+orders is already named for what it counts. Found by asserting the rendered scrape rather than by
+reading the code, which is why `OrderMetricsTest` checks the *wrong* name is absent too.
+
+**Metrics are not transactional.** `orders.placed` is incremented in `OrderService`, after the
+transactional call returns — never inside `OrderPlacement`. A counter has no rollback hook, so an
+increment inside a transaction that later rolls back is never undone and the number drifts upward
+forever.
+
+### Known limits of Phase 15
+
+- **`/actuator/prometheus` is anonymous.** A scraper cannot hold a 15-minute JWT. The real fix is
+  `management.server.port` on a port that is never published — that splits the Spring context in two
+  and is a phase's work of its own.
+- **Nothing delivers the alert.** Prometheus evaluates it and shows it on `/alerts`; paging anyone
+  needs Alertmanager.
+- **7 days of retention**, on local disk. Prometheus is for recent operational questions.
+- **No trace exemplars**, so a slow request on a graph cannot be opened as a trace. Phase 23.
+- **Checkout only.** Cart abandonment, catalogue browsing and login failures are all measurable and
+  none of them are measured yet.

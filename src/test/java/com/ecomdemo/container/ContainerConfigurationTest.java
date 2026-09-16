@@ -173,6 +173,25 @@ class ContainerConfigurationTest {
             assertThat(service("postgres")).containsKey("healthcheck");
             assertThat(service("app")).containsKey("healthcheck");
         }
+
+        @Test
+        @SuppressWarnings("unchecked")
+        void compose_always_probesReadinessRatherThanLiveness() {
+            // GIVEN the app's healthcheck command
+            Map<String, Object> healthcheck = (Map<String, Object>) service("app").get("healthcheck");
+            String test = String.valueOf(((List<String>) healthcheck.get("test")).getLast());
+
+            // THEN it asks the readiness group, which includes the database and Redis, so an app
+            // that is running but cannot reach either is not reported healthy.
+            assertThat(test).contains("/actuator/health/readiness");
+
+            // Liveness would be the wrong probe here and is the easy mistake: it excludes
+            // dependencies on purpose, so it answers UP while the database is unreachable - and
+            // compose would route traffic to an instance that can serve nothing.
+            assertThat(test)
+                    .as("liveness excludes dependencies by design and must not be the compose probe")
+                    .doesNotContain("/actuator/health/liveness");
+        }
     }
 
     @Nested

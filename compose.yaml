@@ -125,11 +125,19 @@ services:
           memory: 768M
 
     healthcheck:
-      # There is no /actuator/health until Phase 15, so this probes a real public endpoint: a 200
-      # here means Tomcat, the security filter chain and a database query all work, which is more
-      # than a port check would tell us. wget comes from busybox in the Alpine base - no extra
-      # package, and no curl in the image.
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/api/products || exit 1"]
+      # The readiness probe, now that Phase 15 has one.
+      #
+      # This is a better question than the old GET /api/products. That asked "can you serve a
+      # request?" and answered it by doing real work; this asks the application itself whether it
+      # considers itself able to take traffic, and the readiness group is defined to include the
+      # database and Redis. A 503 here means the app is running but cannot serve - exactly the state
+      # compose should not call healthy.
+      #
+      # Liveness is deliberately NOT used here: it excludes dependencies by design, so it would
+      # report healthy while the database was unreachable.
+      #
+      # wget comes from busybox in the Alpine base - no extra package, and no curl in the image.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/actuator/health/readiness || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -138,5 +146,89 @@ services:
 
     restart: unless-stopped
 
+  prometheus:
+    image: prom/prometheus:v3.5.5
+    # The LTS line. Pinned to an exact patch: `latest` means the stack you debug on Monday is not
+    # the stack you deployed on Friday.
+
+    # Read-only mounts: Prometheus reads its configuration and never writes to it. If a future
+    # change needs a writable path, give it one rather than dropping the :ro.
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/prometheus/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - promdata:/prometheus
+
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # 7 days. Prometheus is for recent operational questions, not for a data warehouse - long
+      # retention is what remote-write and a different system exist for.
+      - --storage.tsdb.retention.time=7d
+      # Lets `curl -X POST .../-/reload` pick up a rules change without restarting the container.
+      - --web.enable-lifecycle
+
+    ports:
+      # Published so you can look at the targets page and the alert while learning. In a real
+      # deployment this stays on the internal network and only Grafana talks to it.
+      - "9090:9090"
+
+    depends_on:
+      app:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.2.2
+
+    environment:
+      # No default. Same reasoning as POSTGRES_PASSWORD: a password nobody chose is a password
+      # everybody knows, and Grafana's out-of-the-box admin/admin is the most guessed pair there is.
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD in .env - copy .env.example}"
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_USER:-admin}"
+      # Anonymous viewing is off. This is a learning stack, but the dashboard reports real traffic
+      # and turning it on is the kind of default that survives into somewhere it should not.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      # Nothing here needs to phone home.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+
+    volumes:
+      # Provisioning: the data source and the dashboard come from files in this repository, so a
+      # fresh volume - or a fresh machine - comes up with the dashboard already there. Anything
+      # clicked into Grafana's UI lives only in gfdata and is invisible to everyone else.
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - gfdata:/var/lib/grafana
+
+    ports:
+      - "3000:3000"
+
+    depends_on:
+      prometheus:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  # Prometheus's time-series database. Losing it loses history, not configuration - the scrape
+  # config and the rules are files in the repository.
+  promdata:
+  # Grafana's own database: users, preferences, and anything created through the UI. The data source
+  # and dashboard are provisioned from files, so this volume is not where they live.
+  gfdata:

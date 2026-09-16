@@ -2,8 +2,11 @@ package com.ecomdemo.order;
 
 import java.util.List;
 
+import com.ecomdemo.common.ConflictException;
 import com.ecomdemo.common.NotFoundException;
 import com.ecomdemo.order.dto.OrderResponse;
+
+import io.micrometer.core.instrument.Timer;
 
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.resilience.annotation.Retryable;
@@ -32,10 +35,14 @@ public class OrderService {
 
     private final OrderRepository orderRepository;
     private final OrderPlacement orderPlacement;
+    private final OrderMetrics orderMetrics;
 
-    public OrderService(OrderRepository orderRepository, OrderPlacement orderPlacement) {
+    public OrderService(OrderRepository orderRepository,
+                        OrderPlacement orderPlacement,
+                        OrderMetrics orderMetrics) {
         this.orderRepository = orderRepository;
         this.orderPlacement = orderPlacement;
+        this.orderMetrics = orderMetrics;
     }
 
     /**
@@ -66,7 +73,33 @@ public class OrderService {
     @Transactional(propagation = Propagation.NEVER)
     @PreAuthorize("#customerId == authentication.principal.id")
     public OrderResponse placeOrder(Long customerId) {
-        return orderPlacement.placeOnce(customerId);
+        /*
+         * The metrics live here, in the non-transactional method, and not in OrderPlacement.
+         *
+         * A meter has no rollback hook. Incrementing orders.placed inside the transaction would
+         * count an order that a later exception erased, and nothing would ever correct it - the
+         * number would drift upward forever. By the time placeOnce() returns, the transaction has
+         * committed and the order exists.
+         *
+         * The cost of putting it here is that this method body runs once per retry attempt, so the
+         * timer sees one sample per attempt rather than one per request. That is deliberate: the
+         * conflict rate is exactly what this phase wants to be able to see.
+         */
+        Timer.Sample sample = orderMetrics.startCheckout();
+        try {
+            OrderResponse order = orderPlacement.placeOnce(customerId);
+            orderMetrics.recordCheckout(sample, OrderMetrics.OUTCOME_SUCCESS);
+            orderMetrics.recordPlacedOrder(order.totalAmount());
+            return order;
+        } catch (ConflictException | OptimisticLockingFailureException ex) {
+            // The request was well-formed and the server's state refused it - an empty cart, a sold
+            // out line, or a lost race. Business outcomes, not faults, and worth their own tag.
+            orderMetrics.recordCheckout(sample, OrderMetrics.OUTCOME_CONFLICT);
+            throw ex;
+        } catch (RuntimeException ex) {
+            orderMetrics.recordCheckout(sample, OrderMetrics.OUTCOME_ERROR);
+            throw ex;
+        }
     }
 
     /**
