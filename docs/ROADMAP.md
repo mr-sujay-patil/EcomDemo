@@ -61,7 +61,7 @@ flowchart LR
 | 12 | Code quality with SonarQube | Quality & Delivery | ✅ Complete |
 | 13 | Redis caching | Performance | ✅ Complete |
 | 14 | Spring Batch | Performance | ⬜ |
-| 15 | Metrics (Actuator, Prometheus, Grafana) | Performance | ⬜ |
+| 15 | Metrics (Actuator, Prometheus, Grafana) | Performance | ✅ Complete |
 | 16 | Centralized logging (Grafana Loki) | Performance | ⬜ |
 | 17 | Apache Kafka | Event-Driven | ⬜ |
 | 18 | Transactional Outbox pattern | Event-Driven | ⬜ |

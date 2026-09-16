@@ -959,3 +959,138 @@ strings with TTLs.
 - The catalogue list is a single key, so any product change invalidates all of it.
 - No cache hit-ratio metrics; logs only, until Actuator and Micrometer in Phase 15.
 - No cache warming, and no protection against a stampede when a hot key expires.
+
+---
+
+## Phase 15 — Metrics & Monitoring
+
+**One starter, because Boot 4 draws the line elsewhere than expected.** Phases 5 and 7 taught that
+Boot 4 splits auto-configuration per technology, so the expectation here was three modules.
+`spring-boot-starter-actuator` already carries `spring-boot-starter-micrometer-metrics` (Micrometer,
+the JVM and HTTP binders, and the Prometheus auto-configuration) and `spring-boot-health` (the health
+groups). Checking the starter's own POM before adding anything saved two redundant dependencies.
+
+**`micrometer-registry-prometheus` is separate, and its absence is silent.** The starter brings the
+auto-configuration for the registry but not the registry itself. Without the second dependency the
+application starts normally, `/actuator/health` works, and `/actuator/prometheus` is simply not there
+— no error, no warning, because the `@ConditionalOnClass` never matches. Exactly the failure shape
+`spring-boot-flyway` had in Phase 5, and the reason both dependencies carry a comment saying so.
+
+**Exposure is an allow-list of four.** Actuator ships around two dozen endpoints and Boot's default
+exposes only `health`. `/actuator/env` is the one worth refusing by name: it prints resolved
+configuration, which is where connection strings live. `ActuatorEndpointsIT` asserts the *absence* of
+`env`, `beans`, `configprops`, `loggers`, `threaddump` and `heapdump`, because a test that only
+checks the four that should be there passes just as happily with `include: "*"`.
+
+### Liveness and readiness are different questions
+
+**Liveness contains `livenessState` and nothing else.** A NO from liveness means "restart this
+process". A database outage is not cured by restarting the application, so including `db` here would
+make every instance report itself dead during a blip, the orchestrator would restart all of them at
+once, and a brief degradation becomes a total outage. This is the single most expensive mistake
+available in this file.
+
+**Readiness includes `db` and `redis`.** A NO from readiness removes the instance from the load
+balancer and leaves it running, so depending on infrastructure is exactly right — an instance that
+cannot reach PostgreSQL can serve nothing useful and should stop being asked to. The compose
+healthcheck therefore probes readiness, not liveness; probing liveness would report healthy while the
+database was unreachable.
+
+**`management.health.probes.enabled: true` is required outside Kubernetes.** It defaults to `false`,
+and without it neither `livenessState` nor `readinessState` exists as an indicator — at which point
+the two groups fail *startup*, because `validate-group-membership` defaults to `true`. That
+validation is worth keeping: without it a typo in a group's includes produces a group that checks
+nothing and always answers UP.
+
+### The business metrics
+
+**A counter, a distribution summary and a timer, chosen by the question each answers.**
+`orders.placed` only ever rises, so it is a Counter. `order.value` is a **DistributionSummary** rather
+than a counter of revenue: a counter answers "how much have we taken" and nothing else, while a
+summary keeps count and sum — revenue is still there — plus the shape of a typical basket, which a
+mean would have hidden. `order.checkout` is a Timer carrying an `outcome` tag, started before the
+attempt and stopped after, so a refused checkout is measured as carefully as a successful one.
+
+**No custom gauge, on purpose.** A gauge is sampled on every scrape, so it must be cheap, and every
+candidate here — carts currently active, products below reorder level — is a database query executed
+on Prometheus's schedule rather than the application's. The gauges worth studying are already
+present: `jvm_memory_used_bytes` and `hikaricp_connections_active` are gauges, and they are on the
+dashboard.
+
+**The meters are recorded outside the transaction, and that is the point.** They live in
+`OrderService.placeOrder`, never in `OrderPlacement.placeOnce`. **A meter has no rollback hook**: an
+increment inside a transaction that later rolls back is never undone, so `orders.placed` would drift
+permanently upward with nothing to reconcile it against. The cost is that `@Retryable` re-runs the
+method body, so the timer sees one sample per *attempt* — which is the useful reading, because
+`outcome="conflict"` is the contention rate Phase 6 introduced and nothing until now could show.
+End-to-end latency including retries is already covered by `http.server.requests`.
+
+**`.baseUnit("orders")` was a bug, found by running it.** Micrometer's Prometheus naming convention
+splices the base unit into the *middle* of the name, so the counter published as
+`orders_placed_orders_total`. The base unit is for bytes and seconds, where it disambiguates; a count
+of orders is already named for what it counts. `OrderMetricsTest.TheScrapedNames` now asserts the
+wrong name is absent as well as the right one present.
+
+**Tag values must be a closed set.** Every distinct tag value is a separate time series, so
+`outcome` has exactly three. A customer id or an order id in a tag is the fastest available way to
+bring down a Prometheus, and it is an easy thing to add without noticing.
+
+### Histograms, not averages
+
+**`percentiles-histogram` rather than `percentiles`.** A histogram is a set of bucket counters, which
+Prometheus can sum across instances, so p95 for the whole service is computable from the parts.
+Percentiles computed per-instance cannot be averaged together and are wrong the moment there is more
+than one replica. Every latency panel therefore uses `histogram_quantile` over `rate(..._bucket[...])`.
+
+### Security, and what is deliberately unfinished
+
+**`health`, `info` and `prometheus` are anonymous; `metrics` requires ADMIN.** Probes cannot obtain a
+token, and Prometheus scrapes on a timer forever while this API's only credential expires in fifteen
+minutes with no refresh flow. `show-details: when-authorized` keeps the component breakdown — which
+names the database and Redis and reports when they are struggling — behind a login.
+
+**That leaves `/actuator/prometheus` readable by anyone who can reach port 8080**, and the scrape
+output lists every URI template and its error counts. It is acceptable here because the whole stack
+is one compose network. The production answer is `management.server.port` on a port that is never
+published, which splits the Spring context in two and drags the security configuration with it —
+a phase's work, recorded here rather than half-done.
+
+### The stack
+
+**Everything Grafana needs is a file in this repository.** A data source added through the UI lives in
+Grafana's volume, is invisible to the repository, and disappears when the volume is rebuilt.
+Provisioned, the stack comes up complete on a machine that has never run it. The data source carries
+an explicit `uid`, because an unset one is generated per install and the provisioned dashboard then
+points at a data source that exists nowhere else — it loads, and every panel reads "Datasource not
+found".
+
+**The dashboard is organised as RED and USE rather than as a pile of graphs.** RED (rate, errors,
+duration) describes the request path and tells you the users are unhappy; USE (utilisation,
+saturation, errors) describes heap, GC, CPU and the connection pool and usually tells you why. The
+Hikari panel is the one most likely to explain a latency spike: `pending` above zero means requests
+are queuing for a connection and the pool is the bottleneck, not the database.
+
+**One alert, and `for: 2m` is the important half.** Without it, a single 500 during a quiet minute is
+a 100% error rate and an instant page. The expression divides rather than counting, so the threshold
+is a proportion and means the same thing at every traffic level, and it filters
+`outcome="SERVER_ERROR"` so a 404 or a 409 — the application working correctly — wakes nobody. When
+no traffic is arriving the denominator is zero and the comparison is false: a quiet service is not a
+broken one.
+
+**Configuration is tested, because every failure in it is silent.** A panel querying a renamed metric
+draws a flat line; a rules file nobody references is valid YAML that never runs; a scrape target of
+`localhost` resolves inside the Prometheus container and finds nothing. `docker compose up` is green
+through all of it. `MonitoringConfigurationTest` parses the files and asserts the structure, and each
+assertion was verified by breaking the file and watching it go red.
+
+### Known gaps, deferred on purpose
+
+- `/actuator/prometheus` is anonymous; a separate unpublished management port is the real fix.
+- Alerts are evaluated by Prometheus and visible on its `/alerts` page, but nothing delivers them —
+  that needs Alertmanager, another service and another technology.
+- No exemplars linking a slow request to its trace; that needs OpenTelemetry (Phase 23).
+- Prometheus retains 7 days on local disk. Long retention is what remote-write and a different
+  storage system exist for.
+- Grafana has one dashboard and no alert rules of its own; Prometheus owns the alerting here.
+- The business meters cover checkout only. Cart abandonment, catalogue browsing and login failures
+  are all measurable and none of them are measured.
