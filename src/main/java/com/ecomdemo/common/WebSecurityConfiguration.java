@@ -93,6 +93,11 @@ public class WebSecurityConfiguration {
                         // deliberately cannot place orders - a role is a job, not a rank.
                         .requestMatchers("/api/cart/**", "/api/orders", "/api/orders/**").hasRole("CUSTOMER")
 
+                        // Confirmations belong to the customer they were sent to. The service
+                        // scopes the query by the caller's id on top of this, so an ADMIN who
+                        // reached the endpoint would still see only their own.
+                        .requestMatchers(HttpMethod.GET, "/api/notifications").hasRole("CUSTOMER")
+
                         /*
                          * Actuator. Rules are matched in order, so the anonymous ones come first.
                          *

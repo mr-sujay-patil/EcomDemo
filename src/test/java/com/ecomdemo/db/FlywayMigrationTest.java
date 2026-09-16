@@ -48,7 +48,7 @@ class FlywayMigrationTest {
                     "select version from flyway_schema_history where version is not null order by installed_rank");
 
             // THEN every migration in db/migration is recorded, in the order it was applied
-            assertThat(versions).containsExactly("1", "2", "3", "4", "5", "6", "7");
+            assertThat(versions).containsExactly("1", "2", "3", "4", "5", "6", "7", "8");
         }
 
         @Test
@@ -71,7 +71,7 @@ class FlywayMigrationTest {
 
             // THEN each one has the checksum Flyway compares on every later start. This is what makes
             // editing an applied migration a startup failure rather than a silent divergence.
-            assertThat(checksums).hasSize(7).doesNotContainNull();
+            assertThat(checksums).hasSize(8).doesNotContainNull();
         }
     }
 
@@ -86,9 +86,12 @@ class FlywayMigrationTest {
                     "select lower(table_name) from information_schema.tables "
                             + "where table_schema = 'public' and table_name not like 'flyway%'");
 
-            // THEN all five are there
+            // THEN every table the entities map to is there, and nothing else
             assertThat(tables).containsExactlyInAnyOrder(
-                    "products", "carts", "cart_items", "orders", "order_items", "order_audit", "users");
+                    "products", "carts", "cart_items", "orders", "order_items", "order_audit", "users",
+                    // V8, Phase 17: the consumer's record of what it sent, and of what it has
+                    // already handled.
+                    "notifications", "processed_events");
         }
 
         @Test
