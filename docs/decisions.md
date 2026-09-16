@@ -1604,10 +1604,11 @@ through Compose. A reader should treat "all six modules are green" as necessary 
 
 ---
 
-## Phase 21 — API Gateway: blocked, not skipped
+## Phase 21 — API Gateway: not blocked after all (corrected)
 
-Recorded here rather than left as a gap in the tracker, because the reason is a hard external
-constraint rather than a choice, and it will need re-checking rather than re-deciding.
+**This entry was wrong when first written and is corrected below.** It originally concluded that the
+phase was blocked. It is not: the combination was measured and it works. The original reasoning is
+kept because the mistake is more instructive than the conclusion.
 
 **No GA Spring Cloud release train targets Spring Boot 4.1.** Checked against Maven Central rather
 than recalled:
@@ -1646,3 +1647,163 @@ precisely the silent downgrade the project's own rules forbid.
 else. If one exists, the phase is ordinary work. If not, the least-bad option is pinning the gateway
 module alone to the Boot version its train supports — legitimate in a multi-module build, since
 services are separate processes, at the cost of two Boot versions in one repository.
+
+---
+
+## Phase 22 — Resilience
+
+### Two resilience libraries, and where the line is
+
+Spring Framework 7 ships `org.springframework.resilience` with `@Retryable` and `@ConcurrencyLimit`,
+and this project has used the former since Phase 6. Adding Resilience4j means two retry mechanisms on
+one classpath, which is worth a rule rather than a shrug.
+
+The line is drawn by **what is being protected**, not by which library is newer:
+
+| Concern | Tool | Where |
+|---|---|---|
+| Local optimistic-lock contention | Spring `@Retryable` | `OrderService.placeOrder`, `StockService.reserve` |
+| Remote HTTP call | Resilience4j | order-service's two clients |
+
+The existing `@Retryable` usages retry an optimistic-lock failure on a *local database write*. That
+is not a network call, has no remote party to protect, and must never acquire a circuit breaker -
+opening a circuit on database contention would refuse writes because writes were contended. Using
+each library for a different kind of failure is clear; using both on the same call would not be.
+
+### Timeouts are the first line of defence, and that is meant literally
+
+A circuit breaker opens on a failure rate. A call with no read timeout never fails - it hangs - so
+the breaker never sees anything to count and never opens. Everything in this phase rests on the two
+lines in `ServiceClientsConfiguration` that Phase 20 added.
+
+This is also why **Resilience4j's `@TimeLimiter` is not used**. It runs the call on another thread
+and cancels a `CompletableFuture`; a blocking `RestClient` call returns a value and cannot be
+interrupted that way. Annotating these methods with it would look like protection and provide none,
+which is worse than an acknowledged gap.
+
+### A 409 became a 503
+
+Until this phase, "catalog-service is unavailable" was reported as a `ConflictException` → 409. That
+was wrong twice over.
+
+It misleads the shopper: 409 means "your request conflicts with our state", so they rebuild a cart
+that was never the problem and hit the same wall. And it misleads the operator: a 409 is a normal
+business outcome that nobody alerts on, so an outage reported as one is an outage nobody sees. 4xx
+means the client is wrong; 5xx means the server is, however inconvenient that is for the error-rate
+graph. `ServiceUnavailableException` carries a `Retry-After`, which is the only actionable thing
+there is to say.
+
+### Where the fallback goes, which cost an afternoon
+
+The first version put `fallbackMethod` on `@CircuitBreaker`. Every test passed. On the running stack,
+an open circuit was answering in ~700ms instead of microseconds, and the `not_permitted` counter read
+**3 per request**.
+
+Resilience4j applies its aspects outermost-first: `Retry → CircuitBreaker → ... → Bulkhead`. A
+fallback runs *inside* the aspect that declares it. So the breaker was catching
+`CallNotPermittedException` and translating it to `ServiceUnavailableException` before the outer
+retry ever saw it - and the retry's `ignoreExceptions` entry for `CallNotPermittedException` could not
+match a type it never received. The retry therefore retried an open circuit three times, with two
+backoff sleeps, to be told the same no.
+
+That defeats the entire point. The value of an open circuit is failing *fast*; spending 700ms and a
+held request thread to be refused three times is worse than useless.
+
+**The fallback belongs on the outermost decorator.** With it on `@Retry`, each layer sees raw failures
+and decides for itself: the breaker counts a transport error, the retry retries it, and a rejection
+reaches the retry unchanged so it can decline. Translation happens once, at the edge, after every
+decorator has had its say.
+
+The measured difference, after the fix:
+
+```
+CLOSED:  1490ms, 621ms  (real attempts, with retries)
+OPEN:       9ms          (1 rejection per request, nothing leaves the process)
+```
+
+### Why no test caught it, and what was added
+
+`ResilientCatalogClientTest` loads the circuit breaker aspect alone. That is correct for testing a
+state machine and structurally blind to an interaction between two decorators - the bug did not exist
+in the configuration it loaded.
+
+`CatalogRetryAndBreakerTest` now loads **both** aspects against the real `application.yml` and asserts
+exactly one rejection per request. It was verified to go red with the old placement and green with the
+new one, which is the project's rule that a new test must fail before it passes.
+
+The general lesson is the one Phase 20 taught three times: a test that loads a subset of production's
+wiring proves something about that subset. Six of the bugs in the last two phases passed the full
+suite and failed on the first real request.
+
+### An open circuit must not make the service unready
+
+`registerHealthIndicator: false`, and `management.health.circuitbreakers.enabled: false`.
+
+Resilience4j offers a health indicator and it is tempting. An open circuit means *my neighbour* is
+down, not *stop sending me traffic*: wiring it into readiness would remove order-service from the load
+balancer because catalog-service was struggling, turning one dependency's bad afternoon into a
+fleet-wide outage - a cascading failure caused by the tool meant to prevent one. Exactly the
+liveness-versus-readiness lesson from Phase 15, in a new costume.
+
+### What is not a failure
+
+A 4xx is an **answer**. Both the breaker and the retry list
+`org.springframework.web.client.HttpClientErrorException` in `ignoreExceptions`, and without it enough
+shoppers asking for a product that does not exist would open the circuit on a catalogue that was
+working perfectly. The retry additionally ignores `CallNotPermittedException`, for the reason above.
+
+Note the polarity trap when asserting this: `CircuitBreakerConfig` exposes
+`getIgnoreExceptionPredicate()` (true = ignore) while `RetryConfig` exposes `getExceptionPredicate()`
+(true = retry). Asserting the wrong one passes while proving the opposite.
+
+### The bulkhead protects the stock reservation, not the catalogue
+
+A dependency that is *down* fails in milliseconds and costs nothing. A dependency that is *slow* holds
+a thread for the full read timeout, and Tomcat's worker pool is bounded - at enough concurrency every
+worker parks inside one call and order-service stops serving *everything*, including endpoints that
+never touch inventory. Nothing crashes; the service simply stops answering.
+
+Reserving stock is the call worth capping: it is on the checkout path and mutates another service's
+state. `maxWaitDuration: 0` rejects rather than queues, because queueing converts thread exhaustion
+into memory exhaustion and adds latency to a request that is going to fail anyway.
+
+`release` is deliberately **outside** the bulkhead and has no breaker. It is the compensating call for
+a checkout that already took stock; rejecting it to protect a thread pool would trade a transient
+capacity problem for permanently stranded stock.
+
+### A dashboard that had been blank since Phase 20
+
+Adding the circuit breaker panel surfaced an unrelated regression: every existing panel filtered
+`application="ecomdemo"`, and Phase 20 changed that tag's value to per-service names via
+`spring.application.name`. Twenty panels were scoped to a label value that no longer existed anywhere.
+
+`MonitoringConfigurationTest` did not catch it because it asserted the dashboard JSON *contained*
+`"ecomdemo"` - a literal copied out of the same file. That proves the string is still there and
+nothing about whether it is right. Pinning a file against itself is a test shape worth recognising and
+avoiding.
+
+Queries now scope by a `$service` template variable populated with `label_values(...)`, so the
+dashboard follows the system rather than being re-edited whenever the set of services changes.
+
+Also worth noting: rejected calls are counted by
+`resilience4j_circuitbreaker_not_permitted_calls_total`, a **separate metric** rather than another
+`kind` on the calls timer - they never ran, so they have no duration to record. Querying the timer for
+`kind="not_permitted"` returns nothing, silently.
+
+### Known gaps, deferred on purpose
+
+- **No retry budget.** Resilience4j caps retries per call, not the proportion of total traffic that may
+  be retries. Under a broad outage three-attempts-per-request is still 3× load on a recovering system;
+  jitter spreads the burst but does not bound it.
+- **The numbers are reasoned, not measured.** Eight concurrent reservations, a window of ten, a 50%
+  threshold - all defensible and none derived from load testing, which is **Phase 30**.
+- **Only order-service is guarded**, because only order-service makes outbound calls. The gateway will
+  want per-route breakers of its own.
+- **No fallback cache.** When the catalogue is down, checkout fails rather than pricing from a
+  remembered value. Deliberate: charging somebody from a stale price is worse than asking them to try
+  again.
+- **Still no way to see which hop was slow.** A breaker says *that* catalog-service failed, never
+  *why*. **Phase 23**.
+- **`@ConcurrencyLimit` from Spring Framework 7 was not evaluated** as an alternative to the
+  Resilience4j bulkhead. It would remove a little of the overlap; it also has no metrics, which this
+  phase needed.

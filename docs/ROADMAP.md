@@ -67,8 +67,8 @@ flowchart LR
 | 18 | Transactional Outbox pattern | Event-Driven | ⬜ |
 | 19 | Modular monolith (Spring Modulith) | Distributed | ⬜ |
 | 20 | Microservices split | Distributed | ✅ Complete |
-| 21 | API Gateway (Spring Cloud Gateway) | Distributed | ⛔ Blocked — no GA Spring Cloud train targets Boot 4.1; see `docs/decisions.md` |
-| 22 | Resilience (Resilience4j) | Distributed | ⬜ |
+| 21 | API Gateway (Spring Cloud Gateway) | Distributed | ⬜ Not started — unsupported-but-working version combination, verified; see `docs/decisions.md` |
+| 22 | Resilience (Resilience4j) | Distributed | ✅ Complete |
 | 23 | Distributed tracing (OpenTelemetry) | Distributed | ⬜ |
 | 24 | Saga pattern (distributed transactions) | Distributed | ⬜ |
 | 25 | Kubernetes | Distributed | ⬜ |

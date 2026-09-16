@@ -9,6 +9,7 @@ import com.ecomdemo.support.TestFixtures;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.springboot.circuitbreaker.autoconfigure.CircuitBreakerAutoConfiguration;
+import io.github.resilience4j.springboot.retry.autoconfigure.RetryAutoConfiguration;
 
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -75,12 +76,21 @@ class ResilientCatalogClientTest {
      */
     private void withBreaker(BiConsumer<CatalogClient, CircuitBreakerRegistry> scenario) {
         new ApplicationContextRunner()
-                // AopAutoConfiguration is not optional here, and leaving it out is the exact
-                // failure this whole class exists to prevent: without auto-proxying the bean is
-                // registered unwrapped, every annotation is inert, and the raw ResourceAccessException
-                // propagates as if no breaker existed. The first run of this test failed that way.
+                // Three auto-configurations, and each is load-bearing.
+                //
+                // AopAutoConfiguration: without auto-proxying the bean is registered unwrapped, every
+                // annotation is inert, and the raw exception propagates as if no breaker existed. The
+                // first run of this test failed exactly that way.
+                //
+                // RetryAutoConfiguration: needed even though this class is about the BREAKER, because
+                // fallbackMethod lives on @Retry - the outermost decorator - so without the retry
+                // aspect there is no fallback and the raw exception escapes. That coupling is the
+                // cost of putting the fallback at the edge, and it is worth paying: see
+                // CatalogRetryAndBreakerTest for the bug the alternative caused.
                 .withConfiguration(AutoConfigurations.of(
-                        AopAutoConfiguration.class, CircuitBreakerAutoConfiguration.class))
+                        AopAutoConfiguration.class,
+                        CircuitBreakerAutoConfiguration.class,
+                        RetryAutoConfiguration.class))
                 .withBean(ResilientCatalogClient.class, () -> new ResilientCatalogClient(rawClient))
                 .withPropertyValues(
                         "resilience4j.circuitbreaker.instances.catalog.slidingWindowType=COUNT_BASED",
@@ -92,7 +102,12 @@ class ResilientCatalogClientTest {
                         // A 4xx is an answer, not a fault - the same rule the real YAML expresses.
                         "resilience4j.circuitbreaker.instances.catalog.ignoreExceptions[0]="
                                 + "org.springframework.web.client.HttpClientErrorException",
-                        "resilience4j.circuitbreaker.instances.catalog.registerHealthIndicator=false")
+                        "resilience4j.circuitbreaker.instances.catalog.registerHealthIndicator=false",
+                        // Retry present but doing nothing: one attempt per call. This class counts
+                        // breaker calls to reason about the sliding window, and real retries would
+                        // make each user call three of them. Retry behaviour is
+                        // CatalogRetryAndBreakerTest's subject, not this one's.
+                        "resilience4j.retry.instances.catalog.maxAttempts=1")
                 .run(context -> scenario.accept(
                         context.getBean(ResilientCatalogClient.class),
                         context.getBean(CircuitBreakerRegistry.class)));
