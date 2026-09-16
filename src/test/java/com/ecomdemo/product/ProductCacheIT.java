@@ -1,8 +1,10 @@
 package com.ecomdemo.product;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 import com.ecomdemo.cart.dto.AddCartItemRequest;
+import com.ecomdemo.common.CacheConfiguration;
 import com.ecomdemo.product.dto.ProductRequest;
 import com.ecomdemo.product.dto.ProductResponse;
 import com.ecomdemo.support.AbstractPostgresIT;
@@ -144,14 +146,22 @@ class ProductCacheIT extends AbstractPostgresIT {
 
         @Test
         void create_always_invalidatesTheList() {
-            // GIVEN the catalogue cached
-            productService.findAll();
+            // GIVEN the catalogue cached, starting from a known state.
+            //
+            // The explicit eviction matters: every integration test in the run shares one Redis, so
+            // without it this test inherits whatever list a previous one left behind and is really
+            // asserting about that. It failed once on CI and never locally, which is the signature
+            // of exactly that kind of shared-state dependency.
+            cacheManager.getCache(CacheConfiguration.PRODUCT_LIST).evict("all");
+            List<Long> before = productService.findAll().stream().map(ProductResponse::id).toList();
 
             // WHEN a product is created through the service
             ProductResponse created = createProduct("Appears Immediately", "15.00", 4);
 
             // THEN it is visible at once - the list entry was dropped rather than left to expire
             assertThat(productService.findAll())
+                    .as("cached list before create was %s; %d must appear after the eviction",
+                            before, created.id())
                     .extracting(ProductResponse::id)
                     .contains(created.id());
         }
