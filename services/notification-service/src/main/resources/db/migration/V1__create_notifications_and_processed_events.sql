@@ -1,3 +1,11 @@
+-- notification-service's schema in its entirety. This was V8 in the monolith's single timeline;
+-- it is V1 here, because this database is new and has never held a product or a cart.
+--
+-- These two tables were always the most service-shaped in the application: no foreign keys, no
+-- joins to anything else, and every value copied out of an event rather than looked up. That was a
+-- deliberate choice in Phase 17 and it is why this was the easiest service to extract - the code
+-- had already stopped depending on data it did not own.
+--
 -- The consumer side of Phase 17: what a notification is, and what stops one being sent twice.
 
 -- One row per confirmation "sent" for an order. Sending is a log line in this phase; the row is the

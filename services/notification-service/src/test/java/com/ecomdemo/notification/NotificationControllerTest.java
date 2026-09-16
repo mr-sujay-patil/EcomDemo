@@ -4,8 +4,8 @@ import java.time.Instant;
 import java.util.List;
 
 import com.ecomdemo.notification.dto.NotificationResponse;
-import com.ecomdemo.support.SecurityTestConfiguration;
-import com.ecomdemo.support.WithMockCustomer;
+import com.ecomdemo.shared.testsupport.SecurityTestConfiguration;
+import com.ecomdemo.shared.testsupport.WithMockCustomer;
 
 import org.junit.jupiter.api.Test;
 
@@ -22,7 +22,7 @@ import static org.mockito.BDDMockito.given;
 
 /** Slice tests for {@link NotificationController}. */
 @WebMvcTest(NotificationController.class)
-@Import(SecurityTestConfiguration.class)
+@Import({SecurityTestConfiguration.class, NotificationServiceAuthorizationRules.class})
 class NotificationControllerTest {
 
     /** Matches the id in @WithMockCustomer, so the stub and the principal agree. */

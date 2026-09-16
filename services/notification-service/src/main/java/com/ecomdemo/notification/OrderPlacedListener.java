@@ -1,7 +1,7 @@
 package com.ecomdemo.notification;
 
 import com.ecomdemo.messaging.KafkaTopics;
-import com.ecomdemo.order.event.OrderPlacedEvent;
+import com.ecomdemo.notification.event.OrderPlacedEvent;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
