@@ -71,6 +71,41 @@ query needs an association, load it with `left join fetch` rather than relying o
 **Comments explain *why*, not *what*.** The code says what it does; a comment earns its place by
 recording a trade-off or a non-obvious constraint.
 
+## Testing conventions
+
+**Naming:** `methodName_condition_expectedResult`. A failure report should read as a sentence.
+
+**Structure:** explicit `// GIVEN`, `// WHEN`, `// THEN` comments. **AssertJ** for every assertion,
+including controller tests. Compare money with `isEqualByComparingTo`, never `isEqualTo` —
+`BigDecimal.equals` compares scale too.
+
+**Pick the cheapest level that can catch the bug:**
+
+| Level | Annotation | Loads | Use for |
+|---|---|---|---|
+| Unit | `@ExtendWith(MockitoExtension.class)` | nothing | every service method — success path **and** at least one failure path |
+| Web slice | `@WebMvcTest(XController.class)` | controller, Jackson, validation, error advice | status codes, JSON shape, headers, exception → status mapping |
+| JPA slice | `@DataJpaTest` | Hibernate, repositories, embedded H2 | hand-written `@Query` only — never Spring Data's generated methods |
+| Integration | `@SpringBootTest` | everything, real port | keep it to one flow test; the pyramid's apex stays small |
+
+**Spring Boot 4 specifics.** `@WebMvcTest` and `@DataJpaTest` come from the separate
+`spring-boot-webmvc-test` and `spring-boot-data-jpa-test` modules. `@MockBean` is removed — use
+`@MockitoBean`. Controller tests use `MockMvcTester`, not classic `perform(...).andExpect(...)`.
+
+**Mock at the boundary you own.** A service test mocks the *collaborating service*, not that
+service's repository — otherwise a refactor in one feature breaks another feature's tests.
+
+**Prefer a stub to a mock for value-like collaborators.** `Clock.fixed(...)` over `mock(Clock.class)`:
+it is a real implementation with known behaviour and needs no stubbing.
+
+**Assert absence where absence is the behaviour.** `verify(repo, never()).save(any())` is how the
+reliance on Hibernate dirty checking is pinned down. In repository tests, `entityManager.clear()`
+then `Persistence.getPersistenceUtil().isLoaded(...)` is how a `join fetch` is pinned down — reading
+the values would pass either way.
+
+**A new test should fail before it passes.** If you cannot make it go red by breaking the code it
+claims to cover, it is not testing that code.
+
 ## Git workflow
 
 **Branches.** `main` is always working and is protected — no direct pushes. Each phase gets

@@ -112,3 +112,61 @@ convention was used: `feature/phase-01-git-github-workflow`.
 - No `CODEOWNERS`, issue templates or Dependabot config; none is named by this phase.
 - `enforce_admins` is off, so an admin can still push to `main` in an emergency. Acceptable for a
   solo repository, worth revisiting with collaborators.
+
+---
+
+## Phase 2 — Automated Testing
+
+**Three Spring Boot 4 surprises, all verified against the classpath before writing a line.**
+`@WebMvcTest` and `@DataJpaTest` are no longer in `spring-boot-test-autoconfigure` — that module is
+down to 22 classes because Boot 4 split the test auto-configurations into per-technology modules,
+exactly as it did for the H2 console in Phase 0. They now need `spring-boot-webmvc-test` and
+`spring-boot-data-jpa-test`. Separately, `@MockBean` is gone; the replacement is `@MockitoBean` from
+`spring-test`. And the starter ships JUnit Jupiter **6.0.3**, not 5 — same annotations and
+programming model, newer major version, no compatibility conflict.
+
+**`MockMvcTester` rather than classic `MockMvc`.** The phase names both MockMvc and AssertJ, and
+`MockMvcTester` is MockMvc behind an AssertJ-fluent API, so the whole suite speaks one assertion
+dialect instead of mixing AssertJ with Hamcrest matchers. The cost is that most tutorials and
+StackOverflow answers still show `perform(...).andExpect(status().isOk())`, so the classic form has
+to be learned separately when reading other codebases.
+
+**Mock the collaborator at the service boundary, not the repository underneath it.** `CartServiceTest`
+mocks `ProductService`, not `ProductRepository`. Whether product lookup works is `ProductServiceTest`'s
+question; mocking one layer down would couple the cart suite to the product service's internals and
+make a refactor there break tests over here.
+
+**`Clock.fixed` instead of a mocked `Clock`.** A fixed clock is a real implementation with known
+behaviour — a *stub*. Mocking it would require stubbing and would additionally record interactions
+nobody asks about. This is why `Clock` was injected as a bean in Phase 0 rather than calling
+`Instant.now()` inline: it made `placedAt` exactly assertable.
+
+**Assert `isLoaded`, not the values, in repository tests.** `CartRepositoryTest` flushes, calls
+`entityManager.clear()` to detach everything, then checks
+`Persistence.getPersistenceUtil().isLoaded(cart, "items")`. Reading the items instead would trigger a
+lazy load and pass whether or not the `join fetch` survived. Confirmed by deleting the fetch clause
+and watching the test fail with the message it was given.
+
+**Assert the absence of calls where the absence is the behaviour.**
+`ProductServiceTest` uses `verify(productRepository, never()).save(any())` on the update path, because
+relying on Hibernate's dirty checking rather than calling `save()` is a deliberate design choice —
+and an invisible one until a test pins it down.
+
+**The suite was tested by breaking the code.** Moving the stock check in `OrderService.placeOrder`
+from before the mutation loop to inside it failed exactly one test — the unit test that owns that
+rule — while the `@SpringBootTest` stayed green. That is the pyramid justifying itself: the
+integration test proves the pieces fit, but only the unit test can see a half-completed mutation.
+
+**No `@DataJpaTest` for `ProductRepository`.** It has no hand-written query, so a test there would
+assert that Spring Data works, which is not ours to verify.
+
+### Known gaps, deferred on purpose
+
+- No coverage measurement — JaCoCo is Phase 12. "Every service method has a test" was checked by
+  reading, not by a tool.
+- `@DataJpaTest` runs on H2, so it verifies the JPQL but not PostgreSQL-specific behaviour.
+  Testcontainers is Phase 7.
+- Everything runs under Surefire; there is no Failsafe split between unit and integration tests. Worth
+  adding when the suite is slow enough to notice — at 6 seconds it is not.
+- `TestFixtures` sets `Product.id` by reflection because the field is `@GeneratedValue` with no
+  setter. Confined to one file, but still a compromise the production design forces.

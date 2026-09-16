@@ -177,3 +177,55 @@ git log --oneline --graph          # the phase-by-phase history
 git tag -l -n1                     # every completed phase
 git show phase-00-complete         # the baseline monolith
 ```
+
+---
+
+## Phase 2 — Automated Testing
+
+**Added:** JUnit 5 (Jupiter), Mockito and Spring test slices. **No application code changed** — the
+only non-test edit is two test-scoped dependencies in `pom.xml`.
+
+**69 tests in about 6 seconds**, arranged as a pyramid:
+
+| Level | What it loads | Tests | Speed |
+|---|---|---|---|
+| **Unit** — `@ExtendWith(MockitoExtension.class)` | Nothing. Plain objects, mocked collaborators | 35 | ~0.1s total |
+| **Slice** — `@WebMvcTest` | Controller, Jackson, validation, the error advice. No DB | 26 | ~0.5s each |
+| **Slice** — `@DataJpaTest` | Hibernate, repositories, embedded H2. No web layer | 7 | ~2s each |
+| **Integration** — `@SpringBootTest` | Everything, on a real port | 1 | ~0.8s |
+
+Broad at the base, narrow at the top: the many fast tests tell you *what* broke, the single slow one
+tells you the pieces still fit together.
+
+### Run them
+
+```bash
+./mvnw clean verify              # everything
+./mvnw test -Dtest=CartServiceTest       # one class
+./mvnw test -Dtest='*ServiceTest'        # just the unit layer
+./mvnw test -Dtest='*ControllerTest'     # just the HTTP contract
+./mvnw test -Dtest='*RepositoryTest'     # just the hand-written JPQL
+```
+
+### Conventions
+
+- **Naming:** `methodName_condition_expectedResult`, so a failure report reads as a sentence —
+  `placeOrder_whenOneLineExceedsStock_throwsConflictAndChangesNothingAtAll`.
+- **Structure:** explicit `// GIVEN`, `// WHEN`, `// THEN` comments.
+- **AssertJ everywhere**, including the controller tests via `MockMvcTester`.
+- Money is compared with `isEqualByComparingTo`, never `isEqualTo` — `BigDecimal.equals` also
+  compares scale, so `259.98` and `259.980` would not match.
+
+### Two tests worth reading
+
+The suite is designed to fail for a reason, not just to be green. Both of these were verified by
+deliberately breaking the production code and watching them go red:
+
+- `CartRepositoryTest` clears the persistence context, then asserts `Persistence.isLoaded(...)` on
+  both association levels. Simply *reading* the values would pass either way, because a lazy load
+  would quietly satisfy it. This is what stops the `left join fetch` — and with it the N+1 problem —
+  regressing unnoticed.
+- `OrderServiceTest.placeOrder_whenOneLineExceedsStock_throwsConflictAndChangesNothingAtAll` asserts
+  that when line two is out of stock, line one's stock is **still 40** and the cart is untouched.
+  Moving the stock check inside the mutation loop fails this test and nothing else — not even the
+  full-stack integration test, which is exactly why the pyramid has a base.
