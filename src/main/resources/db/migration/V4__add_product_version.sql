@@ -1,0 +1,15 @@
+-- The column behind JPA optimistic locking.
+--
+-- Hibernate increments it on every update to a product row and writes
+--     UPDATE products SET ..., version = 4 WHERE id = ? AND version = 3
+-- If another transaction got there first the row no longer has version 3, zero rows are updated, and
+-- Hibernate raises an OptimisticLockException. That is the whole mechanism: no locks are taken and
+-- nothing blocks - the loser simply finds out at write time that it was working from a stale read.
+--
+-- Without it, two concurrent orders for the last unit both read stock = 1, both write stock = 0, and
+-- the second silently overwrites the first. That is a lost update, and it is the one anomaly
+-- READ COMMITTED does not prevent.
+--
+-- NOT NULL DEFAULT 0 keeps this backward compatible: existing rows get a value without a rewrite,
+-- and code that has never heard of the column keeps working.
+ALTER TABLE products ADD COLUMN version BIGINT NOT NULL DEFAULT 0;

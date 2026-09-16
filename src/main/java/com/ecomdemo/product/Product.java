@@ -8,6 +8,7 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 
 /**
  * A catalogue item. This is a persistence concern only: it is never returned from a controller,
@@ -45,6 +46,22 @@ public class Product {
      */
     @Column(length = 100)
     private String category;
+
+    /**
+     * The optimistic lock. Hibernate increments this on every update and adds {@code AND version = ?}
+     * to the WHERE clause, so an update built on a stale read matches no rows and fails loudly
+     * instead of silently overwriting whoever got there first.
+     *
+     * <p>No getter is exposed and nothing in the application ever reads it: it belongs to Hibernate,
+     * and putting it in {@code ProductResponse} would leak a persistence detail into the API.
+     *
+     * <p>Stock is the field that makes this necessary. Two concurrent orders for the last unit both
+     * read {@code stockQuantity = 1} and both write {@code 0} - a lost update, and the one anomaly
+     * READ COMMITTED does not prevent.
+     */
+    @Version
+    @Column(nullable = false)
+    private long version;
 
     /** JPA requires a no-arg constructor to instantiate the entity through reflection. */
     protected Product() {
