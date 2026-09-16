@@ -12,7 +12,6 @@ import com.ecomdemo.common.NotFoundException;
 
 import com.ecomdemo.support.WithMockCustomer;
 
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.factory.annotation.Autowired;

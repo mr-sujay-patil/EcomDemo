@@ -52,8 +52,7 @@ public class WebSecurityConfiguration {
     @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
     public SecurityFilterChain filterChain(HttpSecurity http,
                                            ApiErrorResponder apiErrorResponder,
-                                           JwtSecurityUserConverter jwtSecurityUserConverter)
-            throws Exception {
+                                           JwtSecurityUserConverter jwtSecurityUserConverter) {
         return http
                 /*
                  * CSRF protection off, because this API is stateless.

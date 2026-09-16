@@ -74,8 +74,9 @@ class CustomerServiceTest {
 
             // THEN what reaches the database is not the password
             String stored = saved.getValue().getPasswordHash();
-            assertThat(stored).isNotEqualTo("correct horse battery");
-            assertThat(stored).startsWith("$2a$");
+            assertThat(stored)
+                    .isNotEqualTo("correct horse battery")
+                    .startsWith("$2a$");
 
             // AND it is a hash of that password - one-way, but verifiable
             assertThat(passwordEncoder.matches("correct horse battery", stored)).isTrue();
@@ -138,8 +139,8 @@ class CustomerServiceTest {
             given(customerRepository.existsByEmail("taken@example.com")).willReturn(true);
 
             // WHEN / THEN
-            assertThatThrownBy(() -> customerService.register(
-                    new RegisterRequest("taken@example.com", "password123", "Nope")))
+            RegisterRequest request = new RegisterRequest("taken@example.com", "password123", "Nope");
+            assertThatThrownBy(() -> customerService.register(request))
                     .isInstanceOf(ConflictException.class)
                     .hasMessageContaining("already exists");
 

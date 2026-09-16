@@ -164,8 +164,8 @@ class ProductServiceTest {
             given(productRepository.findById(9999L)).willReturn(Optional.empty());
 
             // WHEN / THEN
-            assertThatThrownBy(() -> productService.update(9999L,
-                    new ProductRequest("Ghost", null, new BigDecimal("1.00"), 1, null)))
+            ProductRequest request = new ProductRequest("Ghost", null, new BigDecimal("1.00"), 1, null);
+            assertThatThrownBy(() -> productService.update(9999L, request))
                     .isInstanceOf(NotFoundException.class)
                     .hasMessage("Product 9999 not found");
             verify(productRepository, never()).save(any());

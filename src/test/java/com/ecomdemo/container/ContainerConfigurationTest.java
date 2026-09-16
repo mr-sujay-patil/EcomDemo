@@ -61,16 +61,18 @@ class ContainerConfigurationTest {
             // GIVEN the Dockerfile
             // THEN there is a named build stage, and the final stage is a JRE rather than a JDK -
             // nothing in the running image compiles anything, and the compiler is the bulk of a JDK
-            assertThat(instructions).contains("AS build");
-            assertThat(instructions).contains("FROM eclipse-temurin:21-jre-alpine");
+            assertThat(instructions)
+                    .contains("AS build")
+                    .contains("FROM eclipse-temurin:21-jre-alpine");
         }
 
         @Test
         void dockerfile_always_extractsTheLayeredJar() {
             // THEN the layers are exploded and copied one at a time, which is what lets Docker cache
             // the 59 MB of dependencies separately from the 426 kB of application code
-            assertThat(instructions).contains("-Djarmode=tools");
-            assertThat(instructions).contains("extract --layers");
+            assertThat(instructions)
+                    .contains("-Djarmode=tools")
+                    .contains("extract --layers");
 
             assertThat(instructions)
                     .as("one COPY per layer, or the caching is pointless")
@@ -102,8 +104,11 @@ class ContainerConfigurationTest {
         void dockerignore_always_excludesTheHeavyAndTheSecret() {
             // THEN the build context stays small and carries nothing sensitive. frontend/ alone is
             // ~41 MB of node_modules that would otherwise be shipped to the daemon on every build.
-            assertThat(dockerignore).contains("frontend/").contains("target/").contains(".git/");
-            assertThat(dockerignore).contains(".env");
+            assertThat(dockerignore)
+                    .contains("frontend/")
+                    .contains("target/")
+                    .contains(".git/")
+                    .contains(".env");
         }
     }
 
@@ -114,8 +119,9 @@ class ContainerConfigurationTest {
         void dockerfile_always_switchesToAnUnprivilegedUser() {
             // THEN a user is created and selected. Root in a container is root on the host kernel -
             // the isolation is namespaces, not a virtual machine.
-            assertThat(instructions).contains("adduser");
-            assertThat(instructions).contains("USER ecomdemo");
+            assertThat(instructions)
+                    .contains("adduser")
+                    .contains("USER ecomdemo");
         }
 
         @Test
@@ -158,9 +164,8 @@ class ContainerConfigurationTest {
 
             // THEN it waits for the database to answer, not just to exist. service_started is the
             // default and is what makes people add sleeps to entrypoints.
-            assertThat(dependsOn).containsKey("postgres");
-            assertThat(((Map<String, Object>) dependsOn.get("postgres")).get("condition"))
-                    .isEqualTo("service_healthy");
+            assertThat((Map<String, Object>) dependsOn.get("postgres"))
+                    .containsEntry("condition", "service_healthy");
         }
 
         @Test
@@ -182,8 +187,10 @@ class ContainerConfigurationTest {
 
             // THEN the host is the service name. Each container has its own network namespace, so
             // localhost inside the app container is the app container - there is no database there.
-            assertThat(url).contains("//postgres:5432/");
-            assertThat(url).doesNotContain("localhost").doesNotContain("127.0.0.1");
+            assertThat(url)
+                    .contains("//postgres:5432/")
+                    .doesNotContain("localhost")
+                    .doesNotContain("127.0.0.1");
         }
 
         @Test
@@ -223,9 +230,11 @@ class ContainerConfigurationTest {
             String example = Files.readString(Path.of(".env.example"));
 
             // THEN it names what is needed and supplies nothing usable
-            assertThat(example).contains("POSTGRES_PASSWORD").contains("JWT_SECRET");
-            assertThat(example).contains("change-me");
-            assertThat(example).contains("openssl rand -base64 48");
+            assertThat(example)
+                    .contains("POSTGRES_PASSWORD")
+                    .contains("JWT_SECRET")
+                    .contains("change-me")
+                    .contains("openssl rand -base64 48");
         }
 
         @Test

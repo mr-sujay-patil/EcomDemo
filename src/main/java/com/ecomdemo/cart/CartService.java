@@ -88,13 +88,12 @@ public class CartService {
     }
 
     /**
-     * Loads the shared cart for other services (the order service) to work with inside their own
-     * transaction. Package-private access would be cleaner, but the order feature lives in a
-     * different package, so this stays public and returns the entity rather than a DTO on purpose.
-     */
-    /**
      * The customer's cart, created if this is their first. Only ever called from a method that
      * writes - the cart endpoints that mutate, and the checkout - so the insert is safe.
+     *
+     * <p>Public, and returning the entity rather than a DTO, on purpose: the order feature lives in
+     * another package and needs the managed entity inside its own transaction. Package-private would
+     * be tidier and would not work.
      */
     public Cart requireCart(Long customerId) {
         return cartRepository.findByCustomerIdWithItems(customerId)
