@@ -1,0 +1,151 @@
+# Build and test every change, and publish an image from every merge to main.
+#
+# The split between those two halves is the CI/CD distinction in one file: the `verify` job is
+# continuous *integration* - prove the change works with everything already on main - and `publish`
+# is the first step of continuous *delivery*, turning a proven commit into a deployable artefact.
+# Nothing here deploys anything, which would be continuous *deployment* and belongs to Phase 25/26.
+
+name: CI
+
+on:
+  # Two triggers, deliberately. A pull request runs the tests before the code is on main; a push to
+  # main runs them again after the merge, because a squash-merge produces a commit that no PR run
+  # ever tested - main can contain a combination neither branch had.
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Least privilege, set once at the top: every job starts read-only and widens only what it needs.
+# The repository default is read-only too, so this is belt and braces - but a workflow that states
+# its own permissions keeps working if that default is ever loosened.
+permissions:
+  contents: read
+
+# Superseded runs are pointless: pushing twice to a PR should test the second push, not both. The
+# main branch is excluded from cancellation - a merge must always finish and publish its image.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+
+  verify:
+    name: Build and test
+    # A GitHub-hosted runner: a fresh virtual machine per job, destroyed afterwards. Docker is
+    # already installed on it, which is why Testcontainers works here with no extra setup - the
+    # integration tests start a real PostgreSQL exactly as they do on a laptop.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          # Caches ~/.m2/repository keyed on the hash of pom.xml. Without it every run
+          # re-downloads Spring Boot, Testcontainers and the rest - minutes of network per build,
+          # for dependencies that change a few times a year. The key means a pom change correctly
+          # invalidates it.
+          cache: maven
+
+      - name: Build and run every test
+        # The project's own wrapper, so CI uses the same Maven as every developer.
+        # -B is batch mode: no progress spinners in a log nobody reads interactively.
+        # verify, not test: that is the phase that runs Failsafe, and the integration tests are the
+        # ones that would catch a PostgreSQL-specific problem.
+        run: ./mvnw -B clean verify
+
+      - name: Upload test reports
+        # if: always() is the important part. The default is to skip a step when an earlier one
+        # failed - which would discard the reports precisely when the build is red and they are the
+        # only thing that explains why.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ github.run_number }}
+          path: |
+            target/surefire-reports/
+            target/failsafe-reports/
+          # Nothing here is worth storing for the default 90 days.
+          retention-days: 14
+          # A build that fails before any test leaves no reports; that is not itself an error.
+          if-no-files-found: ignore
+
+  publish:
+    name: Publish image to GHCR
+    # Two guards, and both are needed. `needs` makes this job wait for the tests and skip entirely
+    # if they failed, so an untested image can never be published. The `if` restricts it to pushes,
+    # because the same workflow runs on pull requests and a PR must not publish anything - not least
+    # because a PR from a fork would then be pushing an image built from someone else's code.
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      # Widened for this job alone: GITHUB_TOKEN needs write access to publish a package. This is
+      # why permissions are declared per job rather than once at the top with the widest set any
+      # job needs - the test job has no business being able to write packages.
+      packages: write
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # No secret to create and none to rotate: GITHUB_TOKEN is minted for this run, scoped by
+          # the permissions above, and expires when the job ends. A personal access token would do
+          # the same job while living forever and belonging to a person who might leave.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Work out the image name
+        id: image
+        # GHCR rejects uppercase characters in an image name, and this repository is
+        # mr-sujay-patil/EcomDemo. ${VAR,,} is bash lower-casing; without it every push fails with
+        # an error about the name rather than about the case.
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # Two tags for one image, because they answer different questions.
+          #
+          # The SHA tag is immutable and identifies exactly one commit: it is what a deployment
+          # should reference, what a rollback needs, and what makes "which code is running?"
+          # answerable. `latest` is mutable and always moves to the newest build: convenient for a
+          # human trying the current version, and useless for anything that needs to be repeatable -
+          # two machines pulling `latest` an hour apart can run different code.
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
+            ${{ steps.image.outputs.name }}:latest
+          # Layer cache in GitHub's own storage, so the 59 MB dependency layer survives between runs
+          # and only changes when pom.xml does - the same layering the Dockerfile sets up in Phase 10,
+          # paying off across builds rather than within one.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summarise what was published
+        # Writes to the run's summary page rather than burying it in the log.
+        run: |
+          {
+            echo "### Image published"
+            echo ""
+            echo '```'
+            echo "${{ steps.image.outputs.name }}:${{ github.sha }}"
+            echo "${{ steps.image.outputs.name }}:latest"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
