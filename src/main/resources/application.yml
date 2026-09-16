@@ -117,7 +117,31 @@ spring:
 
       properties:
         spring.deserializer.key.delegate.class: org.apache.kafka.common.serialization.StringDeserializer
-        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+        # Which deserializer to use is decided per topic, not once for the application.
+        #
+        # The dead-letter topic is the reason. A record lands there precisely because it could not be
+        # turned into an OrderPlacedEvent, so pointing the DLT consumer at a JSON deserializer means
+        # it fails on exactly the payload it exists to report - the @DltHandler never runs, nothing is
+        # logged, and the only evidence that anything arrived is the record itself. (Found by running
+        # the stack: the IT read the DLT with its own raw consumer and passed, while the application's
+        # own handler was silently failing.)
+        #
+        # ByteArrayDeserializer cannot fail, which is what a dead-letter consumer needs.
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.DelegatingByTopicDeserializer
+        #
+        # One pattern and a separate default, rather than two patterns.
+        #
+        # The patterns are matched in the iteration order of a map, which is not the order they are
+        # written in - so listing `.+` as the second entry does not make it a fallback, it makes it a
+        # competitor that also matches `orders.placed-dlt` and wins about half the time. That is the
+        # worst kind of bug: the integration test passed while the same configuration in a container
+        # sent the DLT through Jackson. `.default` is the supported way to say "everything else".
+        #
+        # Also one unbroken quoted line: the value is parsed as comma-separated <pattern>:<class>
+        # pairs with no trimming, and a YAML folded block (>) joins its lines with a space, which
+        # silently corrupts the entry after the first.
+        spring.kafka.value.serialization.bytopic.config: "orders\\.placed-dlt:org.apache.kafka.common.serialization.ByteArrayDeserializer"
+        spring.kafka.value.serialization.bytopic.default: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
 
         # The producer writes a __TypeId__ header naming the class it serialised. Trusting every
         # package would let whoever can write to the topic name any class on the classpath and have

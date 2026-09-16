@@ -300,6 +300,25 @@ services:
       # means the volume survives an image upgrade that changes that default.
       CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
 
+      # Cap the heap, for the same reason the app service has a memory limit: an unconstrained JVM
+      # sizes its heap against the whole machine, and there are three other JVMs in this stack doing
+      # the same. Kafka's start script defaults to -Xmx1G, which on a 4 GB Docker VM alongside the
+      # application, Grafana and Kafka UI is enough to push the lot into GC thrash - the broker then
+      # cannot answer its own broker-to-controller heartbeat inside its 2 second timeout, fences
+      # itself, unloads all 50 __consumer_offsets partitions, and every consumer rejoins. That loop
+      # presents as a broker pinned at 400% CPU with an empty topic, which looks like anything but a
+      # memory problem.
+      #
+      # 512m is generous for a single broker holding a few thousand small records; Kafka does its
+      # real work in the page cache, which is off-heap.
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
+
+    # Room for the heap above plus the JVM's own overhead and page cache.
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
     volumes:
       # The commit log - the messages themselves, the consumer offsets, and the KRaft metadata.
       # Unlike redis above, this one gets a volume: Kafka is a log, not a cache. Dropping it loses
@@ -336,6 +355,9 @@ services:
       KAFKA_CLUSTERS_0_NAME: ecomdemo
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       DYNAMIC_CONFIG_ENABLED: "false"
+      # Kafka UI is a Spring Boot application, so it sizes its heap against the whole VM too. It is
+      # a viewer for a handful of topics and does not need more than this.
+      JAVA_OPTS: -Xms128m -Xmx256m
 
     ports:
       # 8081, because the application already owns 8080. Read-only inspection: topics, partitions,
@@ -346,6 +368,11 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
     restart: unless-stopped
 

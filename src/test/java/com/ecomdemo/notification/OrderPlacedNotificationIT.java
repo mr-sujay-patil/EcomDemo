@@ -24,8 +24,11 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.support.KafkaHeaders;
@@ -47,6 +50,7 @@ import static org.awaitility.Awaitility.await;
  * it goes, so nothing here asserts on a count of all rows - each test creates what it needs and
  * asserts on that.
  */
+@ExtendWith(OutputCaptureExtension.class)
 class OrderPlacedNotificationIT extends AbstractPostgresIT {
 
     @Autowired
@@ -149,7 +153,7 @@ class OrderPlacedNotificationIT extends AbstractPostgresIT {
     }
 
     @Test
-    void aPoisonMessage_always_landsInTheDeadLetterTopic() {
+    void aPoisonMessage_always_landsInTheDeadLetterTopic(CapturedOutput output) {
         // GIVEN a consumer parked on the dead-letter topic before anything is sent to it
         try (Consumer<String, byte[]> dlt = deadLetterConsumer()) {
 
@@ -190,6 +194,18 @@ class OrderPlacedNotificationIT extends AbstractPostgresIT {
                                 .lastHeader(KafkaHeaders.ORIGINAL_TOPIC).value()))
                                 .isEqualTo(KafkaTopics.ORDERS_PLACED);
                     });
+
+            // AND the application's own @DltHandler ran.
+            //
+            // Asserted separately, and not redundantly. The check above uses a consumer this test
+            // built, and it passed while OrderPlacedListener.onDeadLetter was silently never called:
+            // the DLT container deserialized with Jackson like every other topic, so it failed on
+            // the one payload it exists to report. Reading the topic proves the record arrived;
+            // only this proves anyone noticed.
+            await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
+                    assertThat(output.getAll())
+                            .contains("DEAD LETTER from " + KafkaTopics.ORDERS_PLACED)
+                            .contains("{not even valid json"));
         }
     }
 

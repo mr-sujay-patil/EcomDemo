@@ -8,6 +8,7 @@ import java.util.Map;
 
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -18,6 +19,8 @@ import org.springframework.boot.kafka.autoconfigure.KafkaAutoConfiguration;
 import org.springframework.boot.kafka.autoconfigure.KafkaProperties;
 import org.springframework.boot.test.context.ConfigDataApplicationContextInitializer;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.kafka.support.serializer.DelegatingByTopicDeserializer;
+import org.springframework.kafka.support.serializer.DelegatingByTopicSerialization;
 import org.springframework.kafka.support.serializer.ErrorHandlingDeserializer;
 import org.springframework.kafka.support.serializer.JacksonJsonDeserializer;
 
@@ -130,6 +133,33 @@ class KafkaConfigurationTest {
                         .containsEntry(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG,
                                 ErrorHandlingDeserializer.class)
                         .containsEntry(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS,
+                                DelegatingByTopicDeserializer.class.getName());
+            });
+        }
+
+        @Test
+        void consumer_always_readsTheDeadLetterTopicAsRawBytes() {
+            runner.run(context -> {
+                Map<String, Object> props = context.getBean(KafkaProperties.class)
+                        .buildConsumerProperties();
+
+                // THEN the DLT gets ByteArrayDeserializer and everything else gets Jackson.
+                //
+                // A record is in the dead-letter topic precisely because it could not be turned into
+                // an OrderPlacedEvent. Pointing that consumer at a JSON deserializer means it fails
+                // on exactly the payload it exists to report: @DltHandler never runs and nothing is
+                // logged. ByteArrayDeserializer cannot fail.
+                assertThat(props.get(DelegatingByTopicSerialization.VALUE_SERIALIZATION_TOPIC_CONFIG))
+                        .asString()
+                        .isEqualTo("orders\\.placed-dlt:" + ByteArrayDeserializer.class.getName());
+
+                // Everything else goes through the default rather than through a second pattern.
+                // Patterns are matched in a map's iteration order, not the order they are written
+                // in, so a ".+" entry would not be a fallback - it would also match the DLT and win
+                // roughly half the time. That is how this was found: the integration test passed
+                // while the same configuration in a container sent the DLT through Jackson.
+                assertThat(props)
+                        .containsEntry(DelegatingByTopicSerialization.VALUE_SERIALIZATION_TOPIC_DEFAULT,
                                 JacksonJsonDeserializer.class.getName());
             });
         }
