@@ -1,0 +1,46 @@
+# customer-service: accounts, login, and the key the whole system trusts.
+#
+# Everything shared with the other four services is imported from the shared-kernel jar; what is here
+# is what makes this service this service.
+spring:
+  application:
+    # Read by shared-kernel's commonTags customizer and stamped onto every metric, which is what
+    # keeps five JVMs' worth of jvm_memory_used_bytes apart on one Grafana dashboard.
+    name: customer-service
+
+  # The profile used when nothing else is specified. SPRING_PROFILES_ACTIVE and
+  # --spring.profiles.active both override it, and @ActiveProfiles overrides it in tests.
+  #
+  # It has to be declared in this file rather than in the imported defaults: Spring Boot refuses
+  # spring.profiles.active in an imported or profile-specific document, because a document that could
+  # activate the profile that decides whether it is loaded is a circle.
+  profiles:
+    active: dev
+
+  config:
+    import: "classpath:ecomdemo-defaults.yml"
+
+server:
+  # Published to the host until Phase 21 puts a gateway in front of everything. Each service owns one
+  # port in the 8081-8085 range; nothing listens on 8080 any more, which is the port the monolith had
+  # and the one the gateway will eventually take.
+  port: 8081
+
+ecomdemo:
+  jwt:
+    # The RSA private key, PKCS#8 PEM, from the JWT_PRIVATE_KEY environment variable. Nothing is
+    # committed. Unset, the service generates a keypair at startup and logs a warning - a fresh clone
+    # works immediately, and tokens simply do not survive a restart of this service.
+    #
+    # Generate a real one with:
+    #   openssl genpkey -algorithm RSA -pkcs8 -pkeyopt rsa_keygen_bits:2048
+    #
+    # This replaced JWT_SECRET in Phase 20. The old HMAC secret could not be shared with five
+    # services without giving all five the ability to mint tokens; only this service holds the
+    # private key now, and the other four fetch the public half from /.well-known/jwks.json.
+    private-key: ${JWT_PRIVATE_KEY:}
+
+    # Short, because a JWT cannot be withdrawn once issued. The window in which a stolen or stale
+    # token still works is exactly its remaining lifetime - and after the split that window is the
+    # same in five services at once, none of which can be told to stop trusting it.
+    expiry: 15m

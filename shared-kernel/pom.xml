@@ -131,4 +131,35 @@
             <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+                Also publish src/test/java as shared-kernel-<version>-tests.jar.
+
+                Test-scoped dependencies are not transitive and neither is test code, so without this
+                the five services would each carry their own copy of "how do I mint a token in a
+                test" - and the four copies that were not maintained would drift until one of them
+                was testing something the application no longer does.
+
+                The bar for putting something in here is higher than for main code, not lower: test
+                helpers shared across modules couple those modules' test suites together. What
+                qualifies is the machinery for *authenticating*, which is identical in all five
+                services by construction, because they all validate the same tokens the same way.
+                Fixtures for entities do not qualify and stay in the service that owns the entity.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>publish-test-support</id>
+                        <goals>
+                            <goal>test-jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>

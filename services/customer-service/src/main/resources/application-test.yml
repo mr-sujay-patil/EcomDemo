@@ -1,0 +1,18 @@
+# The profile the test suite runs under (@ActiveProfiles("test")).
+#
+# An embedded H2 so `./mvnw clean verify` needs no installed server and no network. MODE=PostgreSQL
+# makes H2 accept PostgreSQL syntax and DATABASE_TO_LOWER mirrors PostgreSQL's habit of folding
+# unquoted identifiers to lower case.
+spring:
+  datasource:
+    url: jdbc:h2:mem:customer-service-test;DB_CLOSE_DELAY=-1;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+
+  # @DataJpaTest would otherwise swap this datasource for a plain embedded one, whose URL carries no
+  # MODE=PostgreSQL - and the migrations would then run against different dialect rules than the ones
+  # they are written for.
+  test:
+    database:
+      replace: none

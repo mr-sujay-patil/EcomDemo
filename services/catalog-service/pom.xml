@@ -28,6 +28,19 @@
         </dependency>
 
         <!--
+            The shared test support: how to mint a token, and how to make @WithMockCustomer reach
+            the filter chain. Published by shared-kernel as a test-jar - test code is not transitive,
+            so it has to be asked for explicitly and by type.
+        -->
+        <dependency>
+            <groupId>com.ecomdemo</groupId>
+            <artifactId>shared-kernel</artifactId>
+            <version>${project.version}</version>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
             Redis and Spring's cache abstraction. Only this service caches: the catalogue is the
             one thing read far more often than it is written, and Phase 13's rule still holds -
             cache what is read to be displayed, never what is read to make a decision. Stock is the
