@@ -27,6 +27,107 @@ spring:
           # and the engine as variables at once.
           time_zone: UTC
 
+  # Apache Kafka. Every setting here is shared by dev and test; the test profile only switches the
+  # listeners off so `./mvnw test` still needs no broker.
+  kafka:
+    # Overridden by SPRING_KAFKA_BOOTSTRAP_SERVERS in compose. The local default matches a broker
+    # published on the host, which is what a `docker run` of apache/kafka would give you.
+    #
+    # "Bootstrap" is literal: this address is used once, to ask the cluster for its full topology.
+    # Everything after that goes straight to whichever broker leads the partition being read or
+    # written, at the address that broker advertises. Listing every broker here is therefore not
+    # required - it only buys resilience for that first call.
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+
+      # Wait for the leader AND every in-sync replica to have written the record before calling the
+      # send successful.
+      #
+      # acks=1 (leader only) is the setting that quietly loses data: the leader acknowledges, then
+      # fails before any follower has copied the record, and a follower that never saw it is
+      # elected. acks=all is the difference between at-least-once and "at-least-once unless
+      # something goes wrong", and the cost is a few milliseconds.
+      acks: all
+
+      # Keep trying. A retriable failure is usually a leader election in progress, which resolves in
+      # seconds; failing the send instead would push a transient problem all the way up to checkout.
+      retries: 10
+
+      properties:
+        # Retries alone can duplicate: the broker may have written the record and lost the network
+        # before acknowledging, so the client retries something already stored. The idempotent
+        # producer gives each producer a session id and each record a sequence number, and the
+        # broker discards a duplicate it has already seen.
+        #
+        # This is exactly-once semantics *for the write*, and it is worth being clear about how far
+        # that reaches: it removes duplicates caused by producer retries, and nothing else. An
+        # application that publishes the same order twice still publishes it twice, which is why
+        # the consumer is idempotent as well.
+        enable.idempotence: true
+
+        # How long send() may block waiting for cluster metadata before giving up. The default is
+        # 60 seconds, and it is a blocking wait on the calling thread - with a broker down, every
+        # checkout would hang for a minute before the event failed. 5 seconds is long enough to ride
+        # out a leader election and short enough that a real outage degrades rather than freezes.
+        max.block.ms: 5000
+
+    consumer:
+      # The consumer group. Kafka divides a topic's partitions among the members of a group, so
+      # running a second instance of this application does not double-deliver anything - it takes
+      # over some of the partitions. Two *different* group ids would each get every message, which
+      # is how independent features subscribe to the same topic.
+      group-id: ecomdemo-notifications
+
+      # Where a brand new group starts. `earliest` replays the topic from the beginning; `latest`
+      # (the default) would silently skip every event published before the consumer first started,
+      # which on a fresh stack means the ones you just produced while testing.
+      auto-offset-reset: earliest
+
+      # Do not commit offsets on a timer.
+      #
+      # Auto-commit acknowledges records the consumer has *received*, not records it has finished
+      # handling - a crash between the commit and the handler is a lost message, silently. Turning
+      # it off hands the decision to the listener container, which commits after the listener method
+      # returns normally. That is what makes the delivery at-least-once rather than at-most-once.
+      enable-auto-commit: false
+
+      # ErrorHandlingDeserializer wraps the real deserializer and catches what it throws.
+      #
+      # Without it a malformed message is not a failed record, it is a failed poll: the container
+      # asks for the batch again, fails to deserialize again, and the partition stops moving
+      # forever. No retry, no dead letter, no progress - just a log line every few seconds. This is
+      # the single most important line in this block, and the failure it prevents looks like a hung
+      # consumer rather than an error.
+      key-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+
+      properties:
+        spring.deserializer.key.delegate.class: org.apache.kafka.common.serialization.StringDeserializer
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+
+        # The producer writes a __TypeId__ header naming the class it serialised. Trusting every
+        # package would let whoever can write to the topic name any class on the classpath and have
+        # Jackson construct it - the shape of several remote-code-execution bugs. An allow-list of
+        # one package is the whole defence.
+        spring.json.trusted.packages: com.ecomdemo.order.event
+
+        # And when there is no header at all - a message hand-crafted with kafka-console-producer,
+        # say - deserialize it as this. Without a default such a message fails, which is a fine
+        # outcome, but a deliberate one is easier to reason about.
+        spring.json.value.default.type: com.ecomdemo.order.event.OrderPlacedEvent
+
+    listener:
+      # Commit the offset after each record's listener method returns, rather than after a batch.
+      #
+      # Slower - one commit per message - and the right default here, because the unit of work is
+      # one notification. With BATCH, a failure on the fourth record of a poll of ten re-delivers
+      # all ten, and the idempotency table would be carrying weight it should not have to.
+      ack-mode: record
+
+
 # Everything this application needs to sign and verify its own tokens.
 ecomdemo:
   jwt:

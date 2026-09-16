@@ -207,6 +207,23 @@
             <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
 
+        <!--
+            Spring for Apache Kafka: KafkaTemplate, @KafkaListener, and the @RetryableTopic
+            machinery that builds the retry and dead-letter topics.
+
+            The starter also carries spring-boot-kafka, the auto-configuration module. Boot 4's
+            per-technology split means that without it the Kafka classes would sit on the classpath
+            and no KafkaTemplate, no ConsumerFactory and no listener container would ever be
+            created - the same silent failure shape as spring-boot-flyway in Phase 5. The starter
+            pulls it in, so there is nothing extra to add here.
+
+            Versions come from the parent POM: spring-kafka 4.1.1 against kafka-clients 4.2.1.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-kafka</artifactId>
+        </dependency>
+
         <!-- JUnit 5, AssertJ, @SpringBootTest and TestRestTemplate. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -233,6 +250,35 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>testcontainers-junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+            A real Kafka broker in a container for the integration tests.
+
+            Note the coordinates again. Testcontainers 2.x renamed every module with a
+            `testcontainers-` prefix, so `org.testcontainers:kafka` - which is what every tutorial
+            shows - is the 1.x line and would pair a 1.x module with a 2.x core. The version comes
+            from the testcontainers-bom the Spring Boot parent already imports.
+
+            The class this brings is org.testcontainers.kafka.KafkaContainer, which runs the
+            official apache/kafka image in KRaft mode. The older org.testcontainers.containers
+            .KafkaContainer in the same jar is the Confluent-plus-ZooKeeper one; this phase wants
+            the former.
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-kafka</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+            KafkaTestUtils and the consumer-building helpers, used by the integration test to read
+            the dead-letter topic directly rather than inferring that something landed there.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-kafka-test</artifactId>
             <scope>test</scope>
         </dependency>
 

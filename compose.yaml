@@ -91,6 +91,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      kafka:
+        # The application publishes on checkout and consumes into the notification table, so a
+        # broker that is not answering yet means a checkout whose event goes nowhere. Waiting for
+        # healthy rather than started is what makes the first order after `up` behave like the
+        # hundredth.
+        condition: service_healthy
 
     environment:
       # postgres, not localhost.
@@ -106,6 +112,12 @@ services:
       # redis, not localhost - the same container-networking rule as the database.
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PORT: "6379"
+
+      # kafka, not localhost - and 9092 is the port inside that container, which is not published.
+      # This is the bootstrap address only: the client asks it which broker leads which partition
+      # and is answered with the ADVERTISED_LISTENERS value, so both names have to resolve on this
+      # network.
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
 
       # Without this the application generates a random signing key on every start, so every restart
       # invalidates every token that was issued before it (Phase 9).
@@ -224,6 +236,120 @@ services:
 
     restart: unless-stopped
 
+  kafka:
+    # The official Apache image, pinned to the same version as the kafka-clients the application
+    # compiles against. A broker and a client from different major lines usually interoperate, but
+    # "usually" is not a thing to discover during a demo.
+    image: apache/kafka:4.2.1
+
+    environment:
+      # --- KRaft ------------------------------------------------------------
+      #
+      # KRaft replaces ZooKeeper. Kafka used to need a second distributed system to remember which
+      # brokers existed and who led each partition; since 4.0 that metadata lives in Kafka itself,
+      # in an internal log managed by a Raft quorum. One system to run, one to upgrade, one to
+      # understand - and this stack has no zookeeper service at all as a result.
+      #
+      # This single container plays both roles. `controller` is the metadata quorum member,
+      # `broker` is the thing that actually stores partitions. Splitting them onto separate nodes
+      # is the production shape; combining them is supported and is what a single-node learning
+      # stack wants.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # id@host:port of every controller. One voter, which is itself.
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+
+      # --- Listeners --------------------------------------------------------
+      #
+      # Two listeners on two ports, and the distinction matters: 9092 carries client traffic,
+      # 9093 carries the Raft metadata votes. LISTENERS is what the broker binds; ADVERTISED_LISTENERS
+      # is the address it hands back to clients so they can reach the partition leader directly.
+      #
+      # That second one is the classic Kafka trap. A client's first connection is only to ask "who
+      # leads what?"; every later connection goes to the advertised address. Advertise `localhost`
+      # here and the app container would be told to connect to itself. It says `kafka` for the same
+      # reason POSTGRES_URL says `postgres`.
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      # --- Single-broker overrides -----------------------------------------
+      #
+      # These three default to 3, because Kafka's defaults assume a real cluster. On one broker a
+      # topic that needs three replicas can never become available, and the failure is not a clean
+      # error: __consumer_offsets is created lazily on the first commit, so the broker starts
+      # perfectly, the app connects perfectly, and the first consumer group hangs.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Default is 3000ms of deliberate waiting, so a starting group can gather its members before
+      # assigning partitions. Sensible with a rolling fleet, pure latency with one consumer.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+      # The image defaults this to /tmp/kraft-combined-logs, which is inside the container's
+      # writable layer and therefore deleted with the container. /var/lib/kafka/data exists in the
+      # image already, owned by the non-root appuser, so a named volume mounted there inherits that
+      # ownership and the broker can write to it.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+
+      # The identity of this Kafka cluster, stamped into the log directory when it is first
+      # formatted. It has to stay the same across restarts or the broker refuses to open a data
+      # directory that belongs to a different cluster. The image has a default, but pinning it here
+      # means the volume survives an image upgrade that changes that default.
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+
+    volumes:
+      # The commit log - the messages themselves, the consumer offsets, and the KRaft metadata.
+      # Unlike redis above, this one gets a volume: Kafka is a log, not a cache. Dropping it loses
+      # every event that has not been consumed yet and resets every consumer group to the beginning.
+      - kafkadata:/var/lib/kafka/data
+
+    # No published port, the same rule as postgres and redis: the app reaches it as `kafka` on the
+    # compose network. Use kafka-ui below to look inside, or:
+    #   docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+    #     --bootstrap-server localhost:9092 --topic orders.placed --from-beginning
+    #
+    # Publishing 9092 would not work the way it looks anyway - ADVERTISED_LISTENERS says `kafka`,
+    # which a host-side client cannot resolve. Reaching a broker from both inside and outside a
+    # container network takes a second listener, which this stack does not need.
+
+    healthcheck:
+      # Asks the broker to list its topics, which means the API is actually answering - a TCP port
+      # accepts connections well before the broker has finished loading its log.
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      # Formatting the log directory on a first start, plus a JVM.
+      start_period: 30s
+
+    restart: unless-stopped
+
+  kafka-ui:
+    # kafbat's fork, which is the maintained one - provectuslabs/kafka-ui has been archived since
+    # 2023 and its last tag predates KRaft-only Kafka entirely.
+    image: ghcr.io/kafbat/kafka-ui:v1.5.0
+
+    environment:
+      KAFKA_CLUSTERS_0_NAME: ecomdemo
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "false"
+
+    ports:
+      # 8081, because the application already owns 8080. Read-only inspection: topics, partitions,
+      # offsets, consumer-group lag, and the messages themselves - including whatever is sitting in
+      # the dead-letter topic.
+      - "8081:8080"
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+
 volumes:
   pgdata:
   # Prometheus's time-series database. Losing it loses history, not configuration - the scrape
@@ -232,3 +358,6 @@ volumes:
   # Grafana's own database: users, preferences, and anything created through the UI. The data source
   # and dashboard are provisioned from files, so this volume is not where they live.
   gfdata:
+  # Kafka's commit log, its consumer offsets and the KRaft metadata log. `docker compose down`
+  # keeps it; `down -v` resets the cluster to empty and every consumer group to offset zero.
+  kafkadata:
