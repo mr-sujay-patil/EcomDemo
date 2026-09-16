@@ -464,3 +464,97 @@ table introduced in Phase 6 was the reliable evidence all along.
 - Nothing runs the ITs automatically — CI is Phase 11, and it will need a Docker-capable runner.
 - The ITs share one container and commit, so they cannot assert on row counts.
 - No container reuse between builds.
+
+---
+
+## Phase 8 — Spring Security (Users & Roles)
+
+**Spring Security 7.1.1, from the parent.** No version pinned. Adding the starter secures every
+endpoint by default, which is the right default and the reason `WebSecurityConfiguration` has to say
+explicitly which endpoints are public rather than which are protected.
+
+**The table is `users`, the class is `Customer`.** USER is reserved in PostgreSQL, so
+`CREATE TABLE user` would need quoting in every statement that mentions it. `@Table(name = "users")`
+resolves the disagreement once.
+
+**One role per user, stored as a string.** Two roles exist and there is no plan for a third, so a
+single `role` column beats a `user_roles` join table: one migration, no join, and building the
+authority list is a one-element `List.of`. Stored as the name rather than the ordinal, because
+reordering the enum must never silently turn every CUSTOMER into an ADMIN. If a user ever needs two
+roles this becomes a join table and a migration — a known, bounded cost.
+
+**The `ROLE_` prefix lives in code, not in the database.** `hasRole("ADMIN")` is Spring Security
+shorthand for the authority `ROLE_ADMIN`; `SecurityUser` adds the prefix when it builds the
+authorities. The column therefore holds the word a human would use, and the framework's convention
+stays in the framework's layer.
+
+**Registration cannot produce an administrator, structurally.** `RegisterRequest` has no `role`
+field at all, so there is no payload a client could send to promote themselves — it is not a check
+that a future refactor could drop. Administrators are seeded by migration.
+
+**The seeded admin's BCrypt hash is committed.** The password is documented in the README. BCrypt is
+one-way so the hash reveals nothing, and the account unlocks a throwaway local database — the same
+reasoning as the local PostgreSQL password committed in Phase 4. The alternative (seed a locked
+account, set the password out of band) costs an extra manual step on every fresh clone and every
+rebuilt database, for a demo credential that grants nothing.
+
+**Password hashing, not encryption.** Encryption is reversible by design; that is the entire point of
+it. A password store needs the opposite property — nobody, us included, should be able to recover
+what the user typed. BCrypt is one-way, salts every hash (so two people with the same password get
+different rows, and one cracked hash unlocks one account), and is deliberately slow, which is what
+makes guessing expensive per attempt. `CustomerServiceTest` uses a **real** encoder rather than a
+mock for exactly this: a mocked encoder would let "the password is hashed" be asserted as "some
+method was called", which would pass just as happily if the hash were the password itself.
+
+**CSRF is disabled because the API is stateless, and that reasoning is only as strong as
+"stateless".** The attack needs a credential the browser attaches automatically — a session cookie.
+Nothing here is attached automatically: credentials arrive in an `Authorization` header a client sets
+deliberately, and no session is ever created. Keeping CSRF on would break every non-browser client to
+defend against something that cannot happen. Store a token in a cookie in some later phase and CSRF
+comes straight back.
+
+**401 and 403 need their own handler, not the `@RestControllerAdvice`.** `GlobalExceptionHandler`
+only sees exceptions thrown from a controller, and authentication and authorization failures happen
+in the servlet filter chain, before any controller is reached. Left alone Spring Security answers
+with an empty body, so a client parsing `{status, message}` would get a surprise on precisely the two
+responses it is most likely to hit. `ApiErrorResponder` implements both hooks; the messages are
+deliberately vague, because distinguishing "no such user" from "wrong password" tells an attacker
+which email addresses are registered.
+
+**Security configuration is split in two.** `HttpSecurity` and `@EnableWebSecurity` only exist in a
+servlet web application, so leaving them in one class broke every
+`@SpringBootTest(webEnvironment = NONE)` — a test wanting the services and the database but no
+server — with a missing-bean error that had nothing to do with what it was testing.
+`WebSecurityConfiguration` carries the rules and `@ConditionalOnWebApplication`; `SecurityConfiguration`
+keeps the password encoder and method security, which apply everywhere.
+
+**Someone else's order is 404, not 403.** 403 confirms the resource exists, which turns sequential
+ids into a way to count the shop's orders and probe which are real. The ownership check lives in the
+WHERE clause (`findByIdAndCustomerWithItems`), so the row is never loaded — a query that *cannot*
+return another customer's order is a stronger guarantee than one that returns it and relies on the
+next line of code to notice. `@PreAuthorize("#customerId == authentication.principal.id")` sits on
+top as belt and braces: the belt that survives a future controller passing the wrong id.
+
+**Controllers take the principal; services take an id.** `@AuthenticationPrincipal` in the controller,
+a `Long customerId` parameter into the service. Reading `SecurityContextHolder` inside services would
+have been less typing and would have made every one of them silently require a logged-in user, and
+untestable without a security context. The service layer stays as free of security as it is of HTTP.
+
+**Reading a cart must not create one.** The integration tests caught this: `getCart` called
+`requireCart`, which creates a cart if missing. Harmless while the single shared cart was seeded by a
+migration and always existed; a 500 once carts became per-customer, and only for brand new accounts —
+the kind of bug that reaches production because it never fires for anyone who already has data.
+`getCart` now returns an empty view with a null `cartId`, and the row appears on the first write.
+
+**Orders keep a nullable owner.** Orders placed before this phase have no user and cannot be given
+one. `NOT NULL` would have meant deleting them; nullable kept them, at the cost of rows belonging to
+nobody that no customer query returns. Measured on the dev database afterwards: 5 orphaned, 2 owned.
+The expand step from Phase 5, applied to a column that will simply never be tightened.
+
+### Known gaps, deferred on purpose
+
+- HTTP Basic sends credentials on every request; over the open internet that demands TLS (Phase 9
+  replaces it with JWT).
+- No password reset, email verification, account lockout or login rate limiting.
+- No administrative view of other people's orders; that needs its own endpoint and rule.
+- One role per user.

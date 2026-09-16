@@ -734,3 +734,116 @@ installed. The ITs are what cover the fidelity gap.
   has to be opted into per developer, and state surviving between runs makes tests order-dependent.
 - The ITs share one container and commit as they go, so none of them may assume an empty table.
 - No CI runs any of this yet — Phase 11.
+
+---
+
+## Phase 8 — Spring Security (Users & Roles)
+
+**Added:** Spring Security. The shop gets real users, and the shared cart that stood in for them
+since Phase 0 is gone.
+
+- **`customer` feature** — register with a BCrypt-hashed password, read your own profile, a `users`
+  table (`V6`).
+- **Roles** — `CUSTOMER` and `ADMIN`, one per user. The administrator is seeded by the migration.
+- **HTTP Basic** authentication, stateless, CSRF disabled.
+- **Cart per user** (`V7`) — orders belong to whoever placed them.
+- **`@PreAuthorize`** so a customer reaches only their own orders.
+- **401 and 403** in the same `{status, message}` shape as every other error.
+
+### Who may do what
+
+| Endpoint | Anonymous | CUSTOMER | ADMIN |
+|---|---|---|---|
+| `GET /api/products/**` | ✅ | ✅ | ✅ |
+| `POST/PUT/DELETE /api/products/**` | 401 | 403 | ✅ |
+| `/api/cart/**` | 401 | ✅ | 403 |
+| `/api/orders/**` | 401 | ✅ (own only) | 403 |
+| `POST /api/customers/register` | ✅ | ✅ | ✅ |
+| `GET /api/customers/me` | 401 | ✅ | ✅ |
+
+An administrator gets **403 on the cart**, which is deliberate: a role is a job, not a rank. ADMIN
+does not contain CUSTOMER, and an administrator has no cart to look at.
+
+### The seeded administrator
+
+```
+email:    admin@ecomdemo.local
+password: admin123
+```
+
+The BCrypt hash of that password is committed in `V6__create_users.sql`. That is safe and deliberate,
+for the same reason the local PostgreSQL password in `application-dev.yml` is: BCrypt is one-way, so
+the hash reveals nothing, and the account unlocks a throwaway local database. **A real deployment
+changes it.**
+
+### Try it
+
+```bash
+# reads are public - no credentials at all
+curl -s localhost:8080/api/products | jq
+
+# writes are not
+curl -s -XPOST localhost:8080/api/products -H 'Content-Type: application/json' \
+     -d '{"name":"X","description":"d","price":1.00,"stockQuantity":1}'
+# {"status":401,"message":"Authentication required"}
+
+# ...unless you are the administrator
+curl -s -u admin@ecomdemo.local:admin123 -XPOST localhost:8080/api/products \
+     -H 'Content-Type: application/json' \
+     -d '{"name":"Admin Widget","description":"made by admin","price":25.00,"stockQuantity":10}' | jq
+
+# register a shopper (note: the email is normalised to lower case)
+curl -s -XPOST localhost:8080/api/customers/register -H 'Content-Type: application/json' \
+     -d '{"email":"Sam@Example.COM","password":"password123","displayName":"Sam"}' | jq
+# {"id":2,"email":"sam@example.com","displayName":"Sam","role":"CUSTOMER",...}
+
+# a shopper may not write to the catalogue - 403, not 401: we know exactly who this is
+curl -s -u sam@example.com:password123 -XDELETE localhost:8080/api/products/18
+# {"status":403,"message":"You do not have permission to perform this action"}
+
+# their cart starts empty and, importantly, uncreated
+curl -s -u sam@example.com:password123 localhost:8080/api/cart | jq
+# {"cartId":null,"items":[],"totalItems":0,"total":0.00}
+
+# shop and check out as usual, with credentials on every request
+curl -s -u sam@example.com:password123 -XPOST localhost:8080/api/cart/items \
+     -H 'Content-Type: application/json' -d '{"productId":18,"quantity":2}' | jq
+curl -s -u sam@example.com:password123 -XPOST localhost:8080/api/orders | jq
+```
+
+**Orders are private.** Register a second shopper and try to read the first one's order:
+
+```bash
+curl -s -u riley@example.com:password123 localhost:8080/api/orders/11
+# {"status":404,"message":"Order 11 not found"}
+```
+
+**404, not 403.** 403 would confirm that order 11 exists, which turns sequential ids into a way to
+count the shop's orders and probe which are real. As far as Riley is concerned it does not exist —
+and the query is scoped, so the row is never even loaded.
+
+### Tests
+
+```bash
+./mvnw clean verify        # 118 unit + 16 integration
+./mvnw test -Dtest='SecurityRulesTest*'
+```
+
+`SecurityRulesTest` is the authorization matrix: for every rule, who is allowed and who is refused,
+using `@WithMockUser` and a `@WithMockCustomer` variant that carries a customer id. It is separate
+from the controller tests on purpose — those ask whether an endpoint *behaves* correctly for someone
+entitled to call it; this asks *who is entitled*. A broken rule does not make an endpoint wrong, it
+makes it available to the wrong people, and every other test in the suite would still pass.
+
+### Known limits of Phase 8
+
+- **HTTP Basic sends credentials on every request**, base64-encoded — which is encoding, not
+  encryption. Fine over localhost; over the open internet it demands TLS without exception. Phase 9
+  replaces it with JWT.
+- **One role per user.** A second role would mean a `user_roles` join table and a migration.
+- **Orders placed before this phase have no owner** and are invisible to every customer. They were
+  kept rather than deleted; `customer_id` is nullable precisely so that history survived.
+- There is no password reset, no email verification, no account lockout and no rate limiting on
+  login — each is a real requirement for a real shop, and none belongs to this phase.
+- The administrator cannot see other people's orders either. An admin view would need its own
+  endpoint and its own rule.
