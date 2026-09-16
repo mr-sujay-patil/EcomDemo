@@ -311,3 +311,84 @@ enforce yet. Keeping it out of the constructor means no existing call site had t
 - Nothing runs migrations separately from application startup. Real deployments usually migrate as a
   distinct step, so a schema change cannot be half-applied by three instances booting at once. That
   needs somewhere to run it from, which arrives with CI in Phase 11.
+
+---
+
+## Phase 6 — Transactions & Concurrency
+
+**`@Retryable` from Spring Framework 7, not the Spring Retry project.** The plan was approved for
+declarative retry via Spring Retry; checking the classpath first showed Framework 7.0.9 ships
+`org.springframework.resilience.annotation.Retryable`, already present through `spring-context`. Same
+annotation shape, same declarative style, no new dependency and no second proxy library whose
+ordering against `@Transactional` has to be reasoned about. It does need `@EnableResilientMethods` —
+without it the annotation compiles, runs and silently never retries, which is why `OrderRetryTest`
+uses a real context: a Mockito-only retry test would pass just as happily in that broken state.
+
+**Three annotations, three beans.** `@Retryable` on `OrderService.placeOrder`, `@Transactional` on
+`OrderPlacement.placeOnce`, `REQUIRES_NEW` on `OrderAuditService.record`. They cannot share a class.
+A retry inside the transaction it retries has nothing left to retry — the transaction is already
+rollback-only — and a retry in a neighbouring method of the same bean does nothing at all, because
+Spring applies both annotations with a proxy that an internal `this.method()` call never reaches.
+That is the self-invocation pitfall, and it fails silently: the code runs, the annotation is ignored,
+and nothing in the logs says so. Splitting the beans makes it structurally impossible rather than a
+comment asking the next person to remember.
+
+**`Propagation.NEVER` on `placeOrder`.** The class-level `@Transactional(readOnly = true)` applies to
+every method, including the retry wrapper — so without an explicit override the retry would run
+inside a read-only transaction that `OrderPlacement` would then join, and the whole split would be
+undone invisibly. `NEVER` says "there must be no transaction here" and throws if there ever is,
+turning the invariant the design depends on into an assertion rather than a hope.
+
+**`placeOnce` flushes explicitly before returning.** The optimistic lock fires on the `products`
+UPDATE, which Hibernate would otherwise defer to commit — after the method returns, while the proxy
+is committing. That is too late to record an audit row for it and too late for `@Retryable` to see
+anything more useful than a failed commit. `orderRepository.flush()` brings the version check inside
+the method, where the failure can be audited and re-thrown deliberately.
+
+**The audit uses `REQUIRES_NEW`, and that has a real cost.** It suspends the caller's transaction,
+runs and commits its own, then resumes — which is why the audit row outlives the rollback it
+describes. The cost is that a suspended transaction still holds its locks and its connection while
+the new one runs, so two connections are in play for every audited attempt. A pool sized 1 would
+deadlock instantly. With the default `REQUIRED` the audit would simply join the caller and roll back
+with it, producing a trail that is complete only for the cases that already worked — worse than no
+audit, because it looks trustworthy.
+
+**H2 and PostgreSQL race differently, and it changes what the test proves.** `ConcurrentOrderTest`
+asserts the invariant (one order, zero stock, never oversold) rather than which error the loser got,
+because that depends on the interleaving. Measured: on H2 the two transactions serialise and the
+version conflict fired **zero times in 40 races** — the loser was always turned away by an already
+empty cart. Against real PostgreSQL over HTTP it fired in **5 of 5 races**, and the audit trail shows
+the full path each time: `PLACED`, then `CONCURRENT_MODIFICATION`, then `EMPTY_CART` on the retry,
+returning 409. So the end-to-end test is necessary but not sufficient on H2, and `OptimisticLockTest`
+exists beside it to pin the lock down deterministically by creating the stale write in a fixed order.
+Phase 7 (Testcontainers) is what would let the concurrency test itself run on PostgreSQL.
+
+**Optimistic, not pessimistic.** Optimistic locking takes no locks and blocks nothing; it detects the
+collision at write time and makes the loser redo the work. That suits a catalogue — read constantly,
+written rarely, contention unusual — and costs literally nothing when nothing collides.
+`@Lock(PESSIMISTIC_WRITE)` (a `SELECT ... FOR UPDATE`) is the opposite trade: the reader blocks
+everyone else until it commits, which is right when contention is the norm rather than the exception
+(a seat map, a ledger balance, a counter every request touches), because there every optimistic
+attempt would fail and the retries would add load to a system already under pressure. It is
+deliberately not implemented here: nothing in this application needs it, and adding an unused
+annotation to demonstrate it would be exactly the kind of speculative code this project avoids.
+
+**Isolation stays at the database default.** `READ COMMITTED` prevents dirty reads and nothing else;
+the anomaly that matters here is the lost update, which `@Version` closes precisely. Raising the
+level to `REPEATABLE READ` or `SERIALIZABLE` would also work, at the cost of more locking or more
+serialisation failures across every query in the application, to fix one write path.
+
+**Committing tests get their own database.** The four `@SpringBootTest` classes that commit rows now
+set a distinct `spring.datasource.url`. They previously shared the one H2 instance that lives for the
+whole JVM, so committed orders leaked into `OrderRepositoryTest`, whose assertions are about an empty
+table. That was a latent ordering dependency `PlaceOrderFlowTest` had been getting away with by luck;
+the new tests made it fail. Isolating per class costs one extra context and migration run each and
+removes execution order from the set of things that can break the build.
+
+### Known gaps, deferred on purpose
+
+- The concurrency test runs on H2, where the interesting path does not occur (Phase 7).
+- No exponential backoff; the retry delay is fixed with jitter, which is enough for three attempts.
+- `order_audit` grows without bound. Retention is an operational concern with nowhere to live yet.
+- The audit records what the application attempted, not who attempted it. There are no users
+  until Phase 8.

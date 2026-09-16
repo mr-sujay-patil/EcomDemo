@@ -48,7 +48,7 @@ class FlywayMigrationTest {
                     "select version from flyway_schema_history where version is not null order by installed_rank");
 
             // THEN every migration in db/migration is recorded, in the order it was applied
-            assertThat(versions).containsExactly("1", "2", "3");
+            assertThat(versions).containsExactly("1", "2", "3", "4", "5");
         }
 
         @Test
@@ -71,7 +71,7 @@ class FlywayMigrationTest {
 
             // THEN each one has the checksum Flyway compares on every later start. This is what makes
             // editing an applied migration a startup failure rather than a silent divergence.
-            assertThat(checksums).hasSize(3).doesNotContainNull();
+            assertThat(checksums).hasSize(5).doesNotContainNull();
         }
     }
 
@@ -88,7 +88,7 @@ class FlywayMigrationTest {
 
             // THEN all five are there
             assertThat(tables).containsExactlyInAnyOrder(
-                    "products", "carts", "cart_items", "orders", "order_items");
+                    "products", "carts", "cart_items", "orders", "order_items", "order_audit");
         }
 
         @Test
@@ -105,6 +105,34 @@ class FlywayMigrationTest {
             assertThat(indexes).contains(
                     "idx_cart_items_cart", "idx_cart_items_product",
                     "idx_order_items_order", "idx_order_items_product");
+        }
+
+        @Test
+        void v4_always_addsTheVersionColumnNotNullWithADefault() {
+            // GIVEN the optimistic lock column V4 added
+            // WHEN its definition is read
+            List<Object> nullable = nativeQuery(
+                    "select is_nullable from information_schema.columns "
+                            + "where lower(table_name) = 'products' and lower(column_name) = 'version'");
+
+            // THEN it is NOT NULL - Hibernate needs a number to compare and increment on every write.
+            // The DEFAULT 0 in the migration is what let it be added NOT NULL without rewriting the
+            // rows that were already there.
+            assertThat(nullable).containsExactly("NO");
+        }
+
+        @Test
+        void v5_always_createsTheAuditTableWithoutAForeignKeyToOrders() {
+            // GIVEN the audit table V5 added
+            // WHEN its foreign keys are read
+            List<Object> foreignKeys = nativeQuery(
+                    "select constraint_name from information_schema.table_constraints "
+                            + "where lower(table_name) = 'order_audit' "
+                            + "and constraint_type = 'FOREIGN KEY'");
+
+            // THEN there are none, deliberately: a failed attempt has no order to point at, and a
+            // cascade must never be able to delete the record of what happened.
+            assertThat(foreignKeys).isEmpty();
         }
 
         @Test

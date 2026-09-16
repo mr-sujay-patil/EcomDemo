@@ -1,78 +1,70 @@
 package com.ecomdemo.order;
 
-import java.time.Clock;
 import java.util.List;
 
-import com.ecomdemo.cart.Cart;
-import com.ecomdemo.cart.CartItem;
-import com.ecomdemo.cart.CartService;
-import com.ecomdemo.common.ConflictException;
 import com.ecomdemo.common.NotFoundException;
 import com.ecomdemo.order.dto.OrderResponse;
-import com.ecomdemo.product.Product;
 
+import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.resilience.annotation.Retryable;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * The checkout use case - the one place in this application where several aggregates change
- * together, which is exactly why it needs a transaction.
+ * The order API the rest of the application calls.
+ *
+ * <p>Reads run in a read-only transaction (the class-level annotation). Checkout does not run in a
+ * transaction at all - it retries one, which is a different job and has to happen outside.
  */
 @Service
 @Transactional(readOnly = true)
 public class OrderService {
 
-    private final OrderRepository orderRepository;
-    private final CartService cartService;
-    private final Clock clock;
+    /**
+     * Two retries, so three attempts in total. Small on purpose: a version conflict means someone
+     * else got there first, and if that keeps happening the honest answer to the caller is 409, not
+     * an ever-longer wait. Retrying forever under contention is how a slow endpoint becomes an
+     * outage.
+     */
+    static final long MAX_RETRIES = 2;
 
-    public OrderService(OrderRepository orderRepository, CartService cartService, Clock clock) {
+    private final OrderRepository orderRepository;
+    private final OrderPlacement orderPlacement;
+
+    public OrderService(OrderRepository orderRepository, OrderPlacement orderPlacement) {
         this.orderRepository = orderRepository;
-        this.cartService = cartService;
-        this.clock = clock;
+        this.orderPlacement = orderPlacement;
     }
 
     /**
-     * Turns the current cart into an order.
+     * Places an order, retrying if another transaction changed a product first.
      *
-     * <p>Stock is checked for every line <em>before</em> anything is written. Checking up front
-     * means a five-line order does not half-complete when line four runs out; combined with
-     * {@code @Transactional}, either the whole order is placed or nothing changes at all.
+     * <p>{@code @Retryable} comes from Spring Framework 7 itself
+     * ({@code org.springframework.resilience}), not the separate Spring Retry project - the
+     * declarative form with no extra dependency.
      *
-     * <p>The stock decrement and the cart clear need no explicit save() - both entities are managed
-     * inside this transaction, so Hibernate's dirty checking flushes them on commit.
+     * <p>Three things about this method are deliberate and easy to get wrong:
+     *
+     * <ul>
+     *   <li>It delegates to {@link OrderPlacement}, a <em>different bean</em>. Calling a
+     *       {@code @Transactional} method on {@code this} would bypass the proxy and run with no
+     *       transaction at all, silently.
+     *   <li>{@link Propagation#NEVER} opts out of the class-level {@code readOnly = true}. A
+     *       class-level {@code @Transactional} applies to every method, so without this the retry
+     *       would run inside a read-only transaction that {@code OrderPlacement} would then join -
+     *       and a rolled-back transaction cannot be retried from inside itself. {@code NEVER} turns
+     *       "no transaction here" from a hope into an assertion that fails loudly.
+     *   <li>Retries are bounded. When they run out the {@code OptimisticLockingFailureException}
+     *       propagates and {@code GlobalExceptionHandler} answers 409 - the request was reasonable,
+     *       the current state would not allow it.
+     * </ul>
      */
-    @Transactional
+    @Retryable(includes = OptimisticLockingFailureException.class, maxRetries = MAX_RETRIES,
+            delay = 25, jitter = 25)
+    @Transactional(propagation = Propagation.NEVER)
     public OrderResponse placeOrder() {
-        Cart cart = cartService.requireCart();
-        if (cart.isEmpty()) {
-            throw new ConflictException("Cannot place an order: the cart is empty");
-        }
-
-        List<CartItem> cartItems = List.copyOf(cart.getItems());
-
-        // 1. Validate the whole cart first - the prices and stock may have moved since it was filled.
-        for (CartItem cartItem : cartItems) {
-            Product product = cartItem.getProduct();
-            if (!product.hasStockFor(cartItem.getQuantity())) {
-                throw new ConflictException("Only " + product.getStockQuantity() + " unit(s) of '"
-                        + product.getName() + "' in stock, ordered " + cartItem.getQuantity());
-            }
-        }
-
-        // 2. Build the order, snapshotting name and price, and reduce stock.
-        Order order = new Order(clock.instant());
-        for (CartItem cartItem : cartItems) {
-            Product product = cartItem.getProduct();
-            product.reduceStock(cartItem.getQuantity());
-            order.addItem(new OrderItem(order, product, cartItem.getQuantity()));
-        }
-        Order saved = orderRepository.save(order);
-
-        // 3. The cart has become the order, so it is emptied.
-        cart.clear();
-
-        return OrderResponse.from(saved);
+        return orderPlacement.placeOnce();
     }
 
     public List<OrderResponse> findAll() {

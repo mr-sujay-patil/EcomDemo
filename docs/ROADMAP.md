@@ -52,7 +52,7 @@ flowchart LR
 | 3 | API documentation (OpenAPI / Swagger) | Foundation | ⬜ |
 | 4 | PostgreSQL | Data | ✅ Complete |
 | 5 | Flyway migrations | Data | ✅ Complete |
-| 6 | Transactions & concurrency | Data | ⬜ |
+| 6 | Transactions & concurrency | Data | ✅ Complete |
 | 7 | Testcontainers | Data | ⬜ |
 | 8 | Spring Security (users & roles) | Security | ⬜ |
 | 9 | JWT authentication | Security | ⬜ |

@@ -196,6 +196,34 @@ query needs an association, load it with `left join fetch` rather than relying o
 **Comments explain *why*, not *what*.** The code says what it does; a comment earns its place by
 recording a trade-off or a non-obvious constraint.
 
+## Transactions and concurrency
+
+**The service layer owns the transaction boundary.** Class-level `@Transactional(readOnly = true)`,
+overridden with `@Transactional` on the methods that write. A class-level annotation applies to
+*every* method, so a method that must not be transactional has to opt out explicitly
+(`Propagation.NEVER` on `OrderService.placeOrder`).
+
+**Self-invocation does not work, and fails silently.** `@Transactional`, `@Retryable` and friends are
+applied by a proxy. Calling `this.otherMethod()` bypasses it entirely: the annotation is ignored, the
+code runs anyway, and nothing is logged. When two annotations must not share a boundary — a retry
+around a transaction, an audit write that must outlive a rollback — put them on **separate beans**.
+That is why `OrderService`, `OrderPlacement` and `OrderAuditService` are three classes.
+
+**Rollback rules.** Spring rolls back on `RuntimeException` and `Error`, and *commits* on a checked
+exception unless you ask otherwise. Every exception this codebase throws from a service
+(`NotFoundException`, `ConflictException`) is unchecked, so the default is the one we want — but a
+checked exception added later would need `@Transactional(rollbackFor = ...)`.
+
+**Writes that race take `@Version`.** `Product` carries one. Optimistic locking suits data that is
+read often and written rarely: it takes no locks and costs nothing until a collision actually
+happens, at which point the loser is told to redo the work. Retry it a bounded number of times
+outside the transaction, then answer 409. `@Lock(PESSIMISTIC_WRITE)` is the tool for the opposite
+shape — contention as the norm rather than the exception — and nothing here needs it yet.
+
+**A test that commits rows needs its own database.** The `test` profile's H2 lives for the whole JVM
+and is shared by every test class, so a non-transactional `@SpringBootTest` that commits will leak
+into other tests' assertions. Give it a distinct `spring.datasource.url` via `@TestPropertySource`.
+
 ## Testing conventions
 
 **Naming:** `methodName_condition_expectedResult`. A failure report should read as a sentence.

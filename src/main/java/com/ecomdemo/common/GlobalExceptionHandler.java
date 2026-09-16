@@ -4,6 +4,7 @@ import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -82,6 +83,24 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(NoResourceFoundException.class)
     public ResponseEntity<ApiError> handleNoResource(NoResourceFoundException ex) {
         return build(HttpStatus.NOT_FOUND, "No endpoint " + ex.getResourcePath());
+    }
+
+    /**
+     * The optimistic lock rejected a write and the retries ran out.
+     *
+     * <p>409 rather than 500: nothing is broken and the request was not malformed. Another
+     * transaction simply changed the same product first, repeatedly - the same category of answer as
+     * "not enough stock", which is what the caller will usually find on trying again.
+     *
+     * <p>Hibernate's own {@code OptimisticLockException} is translated into this Spring exception by
+     * the persistence exception translation that {@code @Repository} on Spring Data interfaces brings
+     * in, which is why the handler can stay free of JPA types.
+     */
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    public ResponseEntity<ApiError> handleOptimisticLock(OptimisticLockingFailureException ex) {
+        log.warn("Optimistic lock conflict after retries: {}", ex.getMessage());
+        return build(HttpStatus.CONFLICT,
+                "Another request changed this data at the same time; please retry");
     }
 
     /** An argument a service rejected outright. */

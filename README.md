@@ -521,3 +521,120 @@ creates, V3's column being nullable, and V2's seed data.
 - `V2__seed_products.sql` means reference data is deployed with the schema. Fine for a demo
   catalogue; real reference data usually wants repeatable migrations (`R__*.sql`) instead.
 - Two concurrent orders for the last unit in stock can still both succeed (Phase 6).
+
+---
+
+## Phase 6 — Transactions & Concurrency
+
+**Added:** JPA optimistic locking and Spring's transaction propagation, used deliberately. No new
+dependency — `@Retryable` comes from Spring Framework 7 itself.
+
+Phase 0 already made checkout atomic by validating the whole cart before touching anything. This
+phase makes it correct when two people do it *at the same time*, which atomicity alone does not.
+
+- **`@Version` on `Product`** — every product `UPDATE` now carries `AND version = ?`. A write built
+  on a stale read matches no rows and fails, instead of silently overwriting the other transaction.
+- **A bounded retry, outside the transaction** — `@Retryable` on `OrderService.placeOrder`, three
+  attempts, then a `409`.
+- **`order_audit`, written with `REQUIRES_NEW`** — every attempt is recorded in its own transaction,
+  so the record of a failure survives the rollback of the failure.
+- **A concurrency test** — two threads, one unit, exactly one order.
+
+### The shape of it
+
+The three annotations have to sit on three different beans, and that is the lesson:
+
+```
+OrderController
+  └─ OrderService.placeOrder()          @Retryable + @Transactional(NEVER)
+       └─ OrderPlacement.placeOnce()    @Transactional          ← one attempt, all-or-nothing
+            └─ OrderAuditService.record()  @Transactional(REQUIRES_NEW)  ← survives the rollback
+```
+
+Put the retry in the same method as the transaction and there is nothing left to retry — the
+transaction is already rollback-only. Put it in a neighbouring method of the *same class* and it
+does nothing at all, because Spring's transactions are applied by a proxy that an internal
+`this.method()` call never passes through. Separate beans make both mistakes impossible rather than
+merely documented.
+
+### Try it — race two checkouts for the last unit
+
+```bash
+# a product with exactly one in stock, in the cart
+ID=$(curl -s -XPOST localhost:8080/api/products -H 'Content-Type: application/json' \
+      -d '{"name":"Last Unit","description":"one only","price":10.00,"stockQuantity":1}' | jq -r .id)
+curl -s -XPOST localhost:8080/api/cart/items -H 'Content-Type: application/json' \
+      -d "{\"productId\":$ID,\"quantity\":1}" -o /dev/null
+
+# two requests at once
+curl -s -XPOST localhost:8080/api/orders -o /dev/null -w '%{http_code}\n' &
+curl -s -XPOST localhost:8080/api/orders -o /dev/null -w '%{http_code}\n' &
+wait
+
+curl -s localhost:8080/api/products/$ID | jq .stockQuantity     # 0, never -1
+```
+
+```
+201
+409
+```
+
+Every time: one order, one conflict, stock `0`. Without `@Version` both would return `201` and the
+shop would have sold two of something it had one of.
+
+### Read the audit trail
+
+```bash
+docker exec ecomdemo-postgres psql -U ecomdemo -d ecomdemo \
+  -c "select id, outcome, left(detail,50) as detail, order_id from order_audit order by id desc limit 6;"
+```
+
+```
+ id |         outcome         |                      detail                        | order_id
+----+-------------------------+----------------------------------------------------+----------
+ 15 | EMPTY_CART              | Cannot place an order: the cart is empty           |
+ 14 | CONCURRENT_MODIFICATION | Another transaction changed a product first: Objec |
+ 13 | PLACED                  | Order placed with 1 line(s), total 10.00          |       10
+```
+
+Read bottom-up, that is one race in full: one thread placed the order; the other had its write
+rejected by the version check; its retry then found the cart already consumed and returned `409`.
+
+**Two of those three rows are in transactions that rolled back.** The orders and stock changes they
+describe do not exist. That is what `REQUIRES_NEW` buys — and deleting it from
+`OrderAuditService.record` makes `OrderAuditRollbackTest` fail while the rest of the suite stays
+green.
+
+### Tests
+
+```bash
+./mvnw clean verify        # 96 tests
+```
+
+| Test | Proves |
+|---|---|
+| `ConcurrentOrderTest` | two threads, one unit, one order — the invariant |
+| `OptimisticLockTest` | `@Version` rejects a stale write, deterministically |
+| `OrderAuditRollbackTest` | a failed order leaves no data and still leaves an audit row |
+| `OrderRetryTest` | the retry, through the real proxy |
+| `OrderPlacementTest` | the checkout rules (moved here from `OrderServiceTest`) |
+
+**An honest caveat about the concurrency test.** It asserts the invariant — one order, zero stock —
+not *how* the loser lost, because that depends on the interleaving. On H2 the two transactions
+serialise: across 40 races the version conflict never fired once, and the loser was always turned
+away by an empty cart. On real PostgreSQL it fires every time. Both outcomes are correct and both
+pass, which is exactly why `OptimisticLockTest` exists alongside it to pin the lock down
+deterministically. Phase 7 (Testcontainers) is what would let the concurrency test run on PostgreSQL
+too.
+
+### Known limits of Phase 6
+
+- Optimistic locking is the right default here — a catalogue is read constantly and written rarely,
+  and taking a lock on every read would cost more than the occasional retry. It is the wrong choice
+  under heavy contention for the same row, where every attempt fails and retries add load. That case
+  wants `@Lock(PESSIMISTIC_WRITE)` (`SELECT ... FOR UPDATE`), which is explained in
+  `docs/decisions.md` but deliberately not implemented — nothing here needs it yet.
+- Isolation is left at the database default (`READ COMMITTED`). `@Version` is what closes the lost
+  update it permits; raising the isolation level instead would be a bigger hammer with a bigger cost.
+- The retry delay is fixed with jitter, not exponential backoff. Fine for three attempts.
+- The audit table has no retention policy. It grows forever.
