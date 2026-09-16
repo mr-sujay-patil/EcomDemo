@@ -1,0 +1,19 @@
+# inventory-service: how many there are.
+spring:
+  application:
+    name: inventory-service
+
+  profiles:
+    active: dev
+
+  config:
+    import: "classpath:ecomdemo-defaults.yml"
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+
+server:
+  port: 8083
