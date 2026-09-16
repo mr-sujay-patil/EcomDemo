@@ -207,20 +207,59 @@ class MonitoringConfigurationTest {
                     .contains("http_server_requests_seconds_bucket")
                     .contains("jvm_memory_used_bytes")
                     .contains("hikaricp_connections_active");
+
+            // ...and the Phase 22 resilience panels, under the names ResilienceMetricsIT pins by
+            // scraping them for real. A panel querying a metric nothing publishes is a flat line
+            // nobody can distinguish from a healthy system.
+            assertThat(allExpressions)
+                    .contains("resilience4j_circuitbreaker_state")
+                    .contains("resilience4j_circuitbreaker_calls_seconds_count")
+                    .contains("resilience4j_circuitbreaker_failure_rate")
+                    .contains("resilience4j_bulkhead_available_concurrent_calls");
         }
 
         @Test
-        void dashboard_always_filtersByTheCommonTagTheApplicationStamps() {
+        void dashboard_always_filtersByTheServiceVariableRatherThanAHardCodedName() {
             // GIVEN the dashboard's queries
-            // THEN they scope to this application. Without the common tag from MetricsConfiguration,
-            // a second service scraped into the same Prometheus would silently be added into these
-            // panels - jvm_memory_used_bytes from two applications is one indistinguishable series.
             List<String> expressions = dashboard.findValues("expr").stream()
                     .map(JsonNode::asText)
+                    // vector(50) and friends are constants with nothing to scope.
+                    .filter(expr -> expr.contains("{"))
                     .toList();
+
+            // THEN every one scopes by the $service variable.
+            //
+            // This assertion used to require application="ecomdemo", and it passed for the whole of
+            // Phase 20 while the dashboard was completely blank. The common tag takes its value from
+            // spring.application.name, which the split changed from "ecomdemo" to "order-service",
+            // "catalog-service" and so on - so every panel was filtering on a label value that no
+            // longer existed anywhere.
+            //
+            // The lesson is about the test, not the dashboard: pinning a file against a literal
+            // copied out of that same file proves the literal is still there and nothing about
+            // whether it is right. It only became visible because Phase 22 added a panel and the
+            // assertion objected to the new name.
             assertThat(expressions).allSatisfy(expr ->
-                    assertThat(expr).as("every panel query scopes to application=\"ecomdemo\"")
-                            .contains("application=\"ecomdemo\""));
+                    assertThat(expr).as("every panel query scopes by the $service variable")
+                            .contains("application=~\"$service\""));
+        }
+
+        @Test
+        void dashboard_always_populatesThatVariableFromWhatIsActuallyReporting() {
+            // GIVEN the templating block
+            JsonNode variables = dashboard.path("templating").path("list");
+
+            // THEN the service list is a query against Prometheus rather than five names typed in.
+            // A hard-coded list goes stale the moment a sixth service appears - and, less obviously,
+            // the moment the label VALUES change, which is exactly what happened above.
+            assertThat(variables).hasSize(1);
+            assertThat(variables.get(0).path("name").asText()).isEqualTo("service");
+            assertThat(variables.get(0).path("query").path("query").asText())
+                    .contains("label_values")
+                    .contains("application");
+            assertThat(variables.get(0).path("includeAll").asBoolean())
+                    .as("All must be available, or the dashboard shows one service by default")
+                    .isTrue();
         }
     }
 
