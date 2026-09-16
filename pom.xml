@@ -46,6 +46,24 @@
         </dependency>
 
         <!--
+            OAuth2 Resource Server: validates the Bearer token on every request.
+
+            It pulls in spring-security-oauth2-jose, which carries both NimbusJwtDecoder (verify a
+            token) and NimbusJwtEncoder (issue one) - so this single dependency covers both halves of
+            the phase. No separate JWT library (jjwt, java-jwt) is needed, and adding one would mean
+            two implementations of the same specification in one application.
+
+            "Resource server" is OAuth2's name for the thing that holds the data and accepts tokens,
+            as distinct from the authorization server that issues them. Here the application is both,
+            which is normal for a self-contained API and is exactly the part that Keycloak or Entra ID
+            would take over later.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+        </dependency>
+
+        <!--
             Spring Security: the filter chain, BCrypt, HTTP Basic and method security. Adding it to
             the classpath secures every endpoint by default - which is the right default, and the
             reason SecurityConfiguration has to say explicitly which endpoints are public.
