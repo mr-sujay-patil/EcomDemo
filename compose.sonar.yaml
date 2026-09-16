@@ -71,7 +71,13 @@ services:
     healthcheck:
       # /api/system/status returns UP only once the web server, the compute engine and the embedded
       # Elasticsearch are all ready - which takes noticeably longer than the port opening.
-      test: ["CMD-SHELL", "wget -qO- http://localhost:9000/api/system/status | grep -q '\"status\":\"UP\"' || exit 1"]
+      #
+      # curl, not wget. The SonarQube image is Debian-based and ships curl only; the wget form works
+      # in the application's Alpine image, where busybox provides it. Getting this wrong does not
+      # break anything visibly - the server runs perfectly and merely reports itself unhealthy
+      # forever, which is worse than a loud failure because `depends_on: service_healthy` would then
+      # wait for a condition that can never arrive.
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/api/system/status | grep -q '\"status\":\"UP\"' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30
