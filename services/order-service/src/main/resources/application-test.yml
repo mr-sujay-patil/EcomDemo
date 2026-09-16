@@ -1,0 +1,42 @@
+# The profile the test suite runs under (@ActiveProfiles("test")).
+spring:
+  datasource:
+    url: jdbc:h2:mem:order-service-test;DB_CLOSE_DELAY=-1;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+
+  test:
+    database:
+      replace: none
+
+  # No broker in the fast suite.
+  #
+  # Some tests are full @SpringBootTest contexts on H2, and a Kafka auto-configuration that tried to
+  # reach a broker would turn `./mvnw test` into something that needs Docker - which Phase 7
+  # established it must not.
+  kafka:
+    # Nothing listens here. Explicit rather than inherited, so a test that does reach a broker is
+    # obviously reaching the wrong one.
+    bootstrap-servers: localhost:1
+    admin:
+      # KafkaAdmin creates the NewTopic beans at context refresh. auto-create false means it never
+      # opens an AdminClient.
+      auto-create: false
+    producer:
+      properties:
+        # The publisher is called for real by tests that place orders. send() blocks waiting for
+        # cluster metadata; 250ms keeps that from being the slowest thing in the suite. The failure
+        # is caught and logged - a checkout that has already committed must not be undone because a
+        # broker is unreachable.
+        max.block.ms: 250
+
+ecomdemo:
+  clients:
+    # Nothing listens on either. Every test either mocks the client interface or stubs the transport
+    # with MockRestServiceServer, so a test that actually dials one of these is reaching for a
+    # service it should have stubbed - and fails immediately rather than hanging.
+    catalog:
+      base-url: http://localhost:1
+    inventory:
+      base-url: http://localhost:1

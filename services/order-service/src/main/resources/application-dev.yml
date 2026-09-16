@@ -1,0 +1,18 @@
+# order-service against its own PostgreSQL database.
+spring:
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/ecomdemo_order}
+    username: ${POSTGRES_USER:ecomdemo}
+    password: ${POSTGRES_PASSWORD:ecomdemo}
+
+    hikari:
+      pool-name: OrderServicePool
+      # Five, like the others - and the limit matters most here. This is the one service that makes
+      # HTTP calls during a request, so a slow neighbour turns into held connections faster than
+      # anywhere else. The mitigation is not a bigger pool: it is that OrderPlacement opens no
+      # transaction until after the remote calls have returned.
+      maximum-pool-size: 5
+      minimum-idle: 1
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
