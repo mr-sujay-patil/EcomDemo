@@ -216,6 +216,65 @@ class SecurityRulesTest {
         }
     }
 
+    /**
+     * The Actuator rows of the matrix.
+     *
+     * <p>No Actuator endpoint is loaded by this slice, so every request here would end in a 404 if it
+     * reached a handler - and that is fine, because none of them does. The filter chain decides
+     * first, which is exactly the subject: a 401 or 403 proves the rule was applied, and a 404 proves
+     * the request was allowed <em>through</em> it. {@code ActuatorEndpointsIT} covers what the
+     * endpoints then answer.
+     */
+    @Nested
+    class ActuatorIsSplitBetweenProbesAndPeople {
+
+        @Test
+        void health_withNoCredentials_isAllowedThrough() {
+            // A Docker healthcheck and a Kubernetes probe cannot obtain a token, so a rule that
+            // required one would make every probe fail.
+            assertThat(mvc.get().uri("/actuator/health")).hasStatus(HttpStatus.NOT_FOUND);
+        }
+
+        @Test
+        void healthGroups_withNoCredentials_areAllowedThrough() {
+            assertThat(mvc.get().uri("/actuator/health/liveness")).hasStatus(HttpStatus.NOT_FOUND);
+            assertThat(mvc.get().uri("/actuator/health/readiness")).hasStatus(HttpStatus.NOT_FOUND);
+        }
+
+        @Test
+        void prometheus_withNoCredentials_isAllowedThrough() {
+            // Prometheus scrapes on a timer forever, and this API's only credential expires in
+            // fifteen minutes with no refresh flow.
+            assertThat(mvc.get().uri("/actuator/prometheus")).hasStatus(HttpStatus.NOT_FOUND);
+        }
+
+        @Test
+        void metrics_withNoCredentials_is401() {
+            assertThat(mvc.get().uri("/actuator/metrics")).hasStatus(HttpStatus.UNAUTHORIZED);
+        }
+
+        @Test
+        @WithMockCustomer(id = 7L)
+        void metrics_asACustomer_is403() {
+            // 403 rather than 404 here, unlike another customer's order: that this endpoint exists is
+            // not a secret, and hiding it would buy nothing.
+            assertThat(mvc.get().uri("/actuator/metrics")).hasStatus(HttpStatus.FORBIDDEN);
+        }
+
+        @Test
+        @WithMockUser(roles = "ADMIN")
+        void metrics_asAnAdministrator_isAllowedThrough() {
+            assertThat(mvc.get().uri("/actuator/metrics")).hasStatus(HttpStatus.NOT_FOUND);
+        }
+
+        @Test
+        void healthPost_withNoCredentials_is401() {
+            // The permits are GET-only, so the anonymous rule cannot be turned into a write path by
+            // anyone who finds a future POST-shaped endpoint under /actuator.
+            assertThat(mvc.post().uri("/actuator/health")).hasStatus(HttpStatus.UNAUTHORIZED);
+        }
+    }
+
     @Nested
     class ErrorsKeepTheStandardShape {
 
