@@ -1700,3 +1700,186 @@ straight to the DLT. Note also that the main topic kept moving — that is the p
 - **No consumer-lag panel** on the Phase 15 dashboard, which is the first thing a real deployment
   would add.
 - **PLAINTEXT, no authentication**, on the compose network only.
+
+---
+
+## Phase 20 — Microservices Split
+
+**Added:** a Maven multi-module build, five independently deployable services, and one database each.
+**No new dependency** — `RestClient` and HTTP Interface clients ship with `spring-boot-starter-web`.
+
+The monolith becomes five services. Each has its own image, its own process, its own database and its
+own Flyway timeline, and each validates JWTs without asking anybody's permission.
+
+| Service | Port | Owns | Talks to |
+|---|---|---|---|
+| **customer-service** | 8081 | accounts, login, the signing key | nothing |
+| **catalog-service** | 8082 | products, the Redis cache | nothing |
+| **inventory-service** | 8083 | stock levels, reservations | nothing |
+| **order-service** | 8084 | carts, orders, the audit trail | catalog + inventory (HTTP), Kafka (publish) |
+| **notification-service** | 8085 | confirmations | Kafka (consume) |
+
+Four of the five are leaves. Only order-service orchestrates, which makes it the most interesting
+service in the system and the most fragile — its availability is the product of its neighbours'.
+
+Port **8080 is deliberately free**. It belonged to the monolith and belongs to the API gateway in
+Phase 21.
+
+### What actually changed in the code
+
+**Entity associations that crossed a boundary are gone.** `CartItem` held a `Product`; it holds a
+`product_id`. `Order` held a `Customer`; it holds a `customer_id`. There is no foreign key behind
+either, because the other table is in another database. `OrderItem`'s snapshot of `productName` and
+`unitPrice` stops being a nicety and becomes the only way an order can be rendered at all.
+
+**Stock left the `products` table.** Price and description are written a few times a year and read on
+every page load — so they are cached. Stock is written by every checkout and must never be cached,
+because two shoppers given the same remembered number both pass the "is there enough?" check. Phase
+13 managed both on one row by carving out `requireEntity` as the one method that must not be
+annotated; with the fields in separate services that rule stops being a matter of care.
+
+**`GET /api/products` no longer reports stock.** Ask `GET /api/stock/{productId}` instead. Composing
+the two is the gateway's job in Phase 21; doing it in catalog-service would mean the catalogue could
+not be served while inventory-service was down.
+
+**HS256 became RS256.** Phase 9's `JwtConfiguration` predicted this: *"a shared HMAC secret stops
+scaling the moment the monolith splits (Phase 20)"*. With HMAC the key that verifies a token is the
+key that signs one, so all five services would have needed the means to mint an admin token.
+customer-service now holds an RSA private key and publishes the public half at
+`/.well-known/jwks.json`; the other four fetch it once and can only check signatures.
+
+### Run it
+
+```bash
+cp .env.example .env          # POSTGRES_PASSWORD and GRAFANA_PASSWORD; JWT_PRIVATE_KEY is optional
+docker compose up -d --build  # 8 containers: 5 services + postgres, redis, kafka
+```
+
+The first `up` builds five images and starts six cold JVMs at once. On a small Docker VM that takes
+**two to four minutes** — the healthcheck grace windows are set accordingly, so be patient rather
+than suspicious. Watch it settle:
+
+```bash
+docker compose ps
+```
+
+Phase 15's dashboard is now opt-in, because three more JVMs on a machine already running six is the
+difference between a stack that idles and one that swaps:
+
+```bash
+docker compose --profile observability up -d   # adds prometheus :9090, grafana :3000, kafka-ui :8086
+```
+
+### Try it — the whole purchase flow, across five services
+
+```bash
+# 1. Register and log in (customer-service)
+EMAIL="you-$(date +%s)@ecomdemo.local"
+curl -s -X POST http://localhost:8081/api/customers/register \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$EMAIL\",\"password\":\"password123\",\"displayName\":\"Shopper\"}"
+
+TOKEN=$(curl -s -X POST http://localhost:8081/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$EMAIL\",\"password\":\"password123\"}" \
+  | python3 -c 'import json,sys;print(json.load(sys.stdin)["accessToken"])')
+
+# 2. The key the other four services verify that token with - public, and meant to be
+curl -s http://localhost:8081/.well-known/jwks.json
+
+# 3. Browse the catalogue (catalog-service) - note: no stockQuantity
+curl -s http://localhost:8082/api/products/1
+
+# 4. Ask inventory-service how many there are
+curl -s http://localhost:8083/api/stock/1
+
+# 5. Add to the cart (order-service, which calls catalog-service for the price)
+curl -s -X POST http://localhost:8084/api/cart/items -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"productId":1,"quantity":2}'
+curl -s -X POST http://localhost:8084/api/cart/items -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"productId":3,"quantity":1}'
+
+# 6. Check out. order-service prices from catalog, reserves from inventory, saves locally,
+#    and publishes orders.placed.
+curl -s -X POST http://localhost:8084/api/orders -H "Authorization: Bearer $TOKEN"
+
+# 7. Stock fell in inventory-service's database, not in catalog-service's
+curl -s http://localhost:8083/api/stock/1     # 40 -> 38
+curl -s http://localhost:8083/api/stock/3     # 15 -> 14
+
+# 8. The cart is empty, and the order is there
+curl -s http://localhost:8084/api/cart   -H "Authorization: Bearer $TOKEN"
+curl -s http://localhost:8084/api/orders -H "Authorization: Bearer $TOKEN"
+
+# 9. And notification-service heard about it over Kafka, in its own process, with its own database
+curl -s http://localhost:8085/api/notifications -H "Authorization: Bearer $TOKEN"
+```
+
+### See the boundary for yourself
+
+The five databases, and the fact that no service can reach another's tables:
+
+```bash
+docker compose exec postgres psql -U ecomdemo -d ecomdemo \
+  -c "SELECT datname FROM pg_database WHERE datname LIKE 'ecomdemo_%' ORDER BY datname;"
+
+docker compose exec postgres psql -U ecomdemo -d ecomdemo_order -c '\dt'
+docker compose exec postgres psql -U ecomdemo -d ecomdemo_order -c 'SELECT count(*) FROM products;'
+#   ERROR:  relation "products" does not exist
+```
+
+That error is the point of the phase. PostgreSQL has no cross-database joins and no cross-database
+foreign keys, so "services do not read each other's data" is enforced by the engine rather than
+remembered in code review.
+
+### Watch a service depend on another and fail honestly
+
+```bash
+docker compose stop catalog-service
+curl -s -X POST http://localhost:8084/api/cart/items -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"productId":1,"quantity":1}'
+#   {"status":404,...} or a 409 at checkout - never a hang, because of the read timeout
+
+curl -s http://localhost:8084/api/cart -H "Authorization: Bearer $TOKEN"
+#   the cart still renders, with lines marked "(unavailable)" and priced at zero
+
+docker compose start catalog-service
+```
+
+A cart is a read and nothing is bought on the strength of it, so it degrades. A checkout prices
+independently and refuses outright, because charging somebody from a number you are not sure of is
+worse than telling them to try again.
+
+### Build it
+
+```bash
+./mvnw clean verify     # all six modules; needs Docker for the integration tests
+./mvnw test             # still needs no Docker at all
+./mvnw -pl services/order-service verify    # one service
+```
+
+### Known limits of Phase 20
+
+These are deliberate, and each names the phase that addresses it.
+
+- **There is no transaction across services, and the compensation is best-effort.** Checkout reserves
+  stock in inventory-service and then writes the order locally. If the write fails, order-service
+  calls `POST /api/stock/releases` to put the stock back — an HTTP call that can itself fail, leaving
+  stock reserved for an order that does not exist. If the process is killed between the two, no
+  compensation happens at all, because nothing on disk remembers a reservation was owed. A durable,
+  expiring reservation is the **saga pattern, Phase 24**.
+- **Clients have timeouts and nothing else.** No circuit breaker, no bulkhead, no fallback. A
+  neighbour that is merely slow will hold order-service's threads until it has none left. **Phase 22**
+  (Resilience4j).
+- **A request cannot be followed across services.** Five sets of logs, no correlation id, no trace.
+  **Phase 23** (OpenTelemetry), and **Phase 16** (Loki) for the logs themselves.
+- **Clients talk to five ports.** CORS, rate limiting and one entry point are **Phase 21**.
+- **No batch import and no sales report.** Those are **Phase 14**, which was skipped.
+- **Checkout still dual-writes to its database and Kafka.** **Phase 18** (transactional outbox), which
+  was also skipped — the order commits first and the event is published after, so a crash in between
+  loses the notification.
+- **The module boundaries were never rehearsed.** **Phase 19** (Spring Modulith) exists to enforce
+  them inside one deployable before they become network calls. This split was derived from the
+  feature packages instead.
+- **One PostgreSQL server, five databases.** The code boundary is exactly as strict as five servers
+  would give; the operational one is not — losing that container takes all five services down.
