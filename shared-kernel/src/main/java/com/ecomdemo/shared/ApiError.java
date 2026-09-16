@@ -1,4 +1,4 @@
-package com.ecomdemo.common;
+package com.ecomdemo.shared;
 
 /**
  * The single error shape every failing request returns: {@code { "status": 404, "message": "..." }}.

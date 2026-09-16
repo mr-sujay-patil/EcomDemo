@@ -1,4 +1,4 @@
-package com.ecomdemo.common;
+package com.ecomdemo.shared;
 
 /**
  * Thrown by a service when a requested entity does not exist. Mapped to HTTP 404 by

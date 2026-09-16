@@ -1,0 +1,2 @@
+com.ecomdemo.shared.autoconfigure.SharedKernelAutoConfiguration
+com.ecomdemo.shared.autoconfigure.ResourceServerAutoConfiguration
