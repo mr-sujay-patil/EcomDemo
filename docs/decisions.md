@@ -1083,6 +1083,35 @@ draws a flat line; a rules file nobody references is valid YAML that never runs;
 through all of it. `MonitoringConfigurationTest` parses the files and asserts the structure, and each
 assertion was verified by breaking the file and watching it go red.
 
+### Two things found by running it, not by reasoning about it
+
+**A lazily registered meter rates to zero.** The checkout timer was originally built inside
+`recordCheckout`, so Micrometer created each outcome's series on its first event. Queried after a run
+of twelve orders, `orders_placed_total` had samples going 0 → 12 and rated correctly, while
+`order_checkout_seconds_count{outcome="success"}` **first appeared already at 12** and rated to
+nothing. `rate()` measures the increase between samples; with no earlier sample to compare against
+there is no increase to report, so the panel stays flat over exactly the events that should have
+moved it.
+
+It is also the difference between "no conflicts happened" and "the conflict series does not exist" —
+identical on a dashboard, very different facts during an incident. All three outcomes are now built in
+the constructor, which is only possible because the tag's value set is closed. The same bug had
+quietly created a test-order dependency: `ActuatorEndpointsIT`'s assertion that `/actuator/metrics`
+lists `order.checkout` was passing only because earlier integration tests had already placed orders
+in the shared JVM.
+
+**A division by a missing series returns nothing, not zero.** With no 5xx at all there is no
+`outcome="SERVER_ERROR"` series, so the error-rate expression produced an empty result and the stat
+panel read *No data* on a perfectly healthy service — the kind of panel people learn to ignore.
+`or vector(0)` on the numerator fixes the display. The alert was correct either way, since an empty
+result cannot exceed 0.05, but the two now use the identical expression so the panel's description
+stays true.
+
+**Both were invisible from inside the JVM.** The registry would have reported both meters as
+perfectly correct; only querying Prometheus showed the first, and only looking at the rendered panel
+showed the second. That is the argument for `BusinessMetricsIT` parsing the scrape output rather than
+reading the `MeterRegistry` bean.
+
 ### Known gaps, deferred on purpose
 
 - `/actuator/prometheus` is anonymous; a separate unpublished management port is the real fix.

@@ -1513,7 +1513,14 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/actuator/env   # 401 - n
 ./mvnw clean verify                                                  # everything, with containers
 ```
 
-### Two things worth knowing
+### Three things worth knowing
+
+**A lazily registered meter rates to zero.** Micrometer creates a meter on first use, so a timer
+registered inside the method it measures has *no series at all* until the first event. Prometheus
+then sees it appear already above zero, and `rate()` — which measures the increase between samples —
+reports nothing for the whole first window. `OrderMetrics` builds all three outcome timers in its
+constructor so each starts at 0. It is also what lets you tell "no conflicts happened" apart from
+"the conflict series does not exist", which look the same on a graph.
 
 **`.baseUnit("orders")` publishes `orders_placed_orders_total`.** Micrometer splices the base unit
 into the middle of the name. It is meant for bytes and seconds, where it disambiguates — a count of
