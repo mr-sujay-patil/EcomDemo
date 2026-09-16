@@ -24,6 +24,27 @@
 
     <properties>
         <java.version>21</java.version>
+
+        <!--
+            Neither of these is managed by the Spring Boot parent - checked against the effective POM
+            rather than assumed - so both carry an explicit version. JaCoCo must be at least 0.8.11
+            to read Java 21 class files.
+        -->
+        <jacoco.version>0.8.15</jacoco.version>
+        <sonar-maven-plugin.version>5.8.0.7211</sonar-maven-plugin.version>
+
+        <!--
+            Where the scanner looks for coverage. Sonar does not measure coverage itself: it reads a
+            report somebody else produced, which is why running sonar:sonar without a preceding
+            `verify` reports 0% rather than an error.
+        -->
+        <sonar.coverage.jacoco.xmlReportPaths>
+            ${project.build.directory}/site/jacoco-merged/jacoco.xml
+        </sonar.coverage.jacoco.xmlReportPaths>
+
+        <!-- Poll after uploading and fail the build if the gate is red. A gate that cannot fail
+             anything is a dashboard. -->
+        <sonar.qualitygate.wait>true</sonar.qualitygate.wait>
     </properties>
 
     <dependencies>
@@ -220,6 +241,86 @@
                 everything in between still executes. That is also why `./mvnw test` needs no Docker
                 at all - it never reaches the phases Failsafe binds to.
             -->
+            <!--
+                JaCoCo measures which lines the tests actually execute, by attaching an agent that
+                instruments classes as they are loaded.
+
+                Two agents, because Phase 7 split the suite: one for Surefire's unit and slice tests
+                and one for Failsafe's integration tests. They write separate .exec files, which are
+                merged into a single report - the 28 integration tests drive real HTTP through the
+                whole stack, and a report that ignored them would understate what the suite covers
+                badly enough to encourage writing redundant unit tests to make a number go up.
+            -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco.version}</version>
+                <executions>
+                    <!-- Sets argLine so Surefire launches its JVM with the agent attached. -->
+                    <execution>
+                        <id>prepare-agent-for-unit-tests</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+
+                    <!-- Same for Failsafe, into a separate destination file. -->
+                    <execution>
+                        <id>prepare-agent-for-integration-tests</id>
+                        <goals>
+                            <goal>prepare-agent-integration</goal>
+                        </goals>
+                    </execution>
+
+                    <!--
+                        Merge after the integration tests have finished, because the agent only
+                        flushes its data when the JVM it is attached to exits.
+                    -->
+                    <execution>
+                        <id>merge-coverage-data</id>
+                        <phase>post-integration-test</phase>
+                        <goals>
+                            <goal>merge</goal>
+                        </goals>
+                        <configuration>
+                            <fileSets>
+                                <fileSet>
+                                    <directory>${project.build.directory}</directory>
+                                    <includes>
+                                        <include>jacoco.exec</include>
+                                        <include>jacoco-it.exec</include>
+                                    </includes>
+                                </fileSet>
+                            </fileSets>
+                            <destFile>${project.build.directory}/jacoco-merged.exec</destFile>
+                        </configuration>
+                    </execution>
+
+                    <!-- The human-readable HTML and the XML the Sonar scanner reads. -->
+                    <execution>
+                        <id>report-merged-coverage</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                        <configuration>
+                            <dataFile>${project.build.directory}/jacoco-merged.exec</dataFile>
+                            <outputDirectory>${project.build.directory}/site/jacoco-merged</outputDirectory>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+                Uploads sources, issues and the coverage report to a SonarQube server. Runs only when
+                asked for explicitly (./mvnw sonar:sonar), so an ordinary build needs no server.
+            -->
+            <plugin>
+                <groupId>org.sonarsource.scanner.maven</groupId>
+                <artifactId>sonar-maven-plugin</artifactId>
+                <version>${sonar-maven-plugin.version}</version>
+            </plugin>
+
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
