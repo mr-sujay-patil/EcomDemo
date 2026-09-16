@@ -11,8 +11,28 @@ import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 
 /**
- * A catalogue item. This is a persistence concern only: it is never returned from a controller,
- * only mapped into a DTO first.
+ * A catalogue item: what a thing is called, what it costs, what it is.
+ *
+ * <h2>What left in Phase 20</h2>
+ *
+ * {@code stockQuantity}, and with it {@code reduceStock} and {@code hasStockFor}. Stock is
+ * inventory-service's data now, in its own table in its own database, and this class has no way to
+ * read it and no business doing so.
+ *
+ * <p>That split is not arbitrary tidying. Price and description are written by an administrator a
+ * few times a year and read on every page load - which is why this service caches them in Redis.
+ * Stock is written by every checkout and must never be served from a cache, because two shoppers
+ * given the same remembered figure both pass the "is there enough?" check. Two fields on one row
+ * with opposite requirements were being managed by one set of compromises; separating them lets each
+ * have what it needs.
+ *
+ * <p>The cost is equally concrete and shows up immediately: nothing can now join products to stock,
+ * so {@code GET /api/products} cannot report availability. Composing the two views is the gateway's
+ * job in Phase 21; until then a client asks catalog-service what exists and inventory-service how
+ * many there are.
+ *
+ * <p>This is a persistence concern only: it is never returned from a controller, only mapped into a
+ * DTO first.
  */
 @Entity
 @Table(name = "products")
@@ -35,9 +55,6 @@ public class Product {
     @Column(nullable = false, precision = 12, scale = 2)
     private BigDecimal price;
 
-    @Column(name = "stock_quantity", nullable = false)
-    private int stockQuantity;
-
     /**
      * Added by V3__add_product_category.sql. Nullable on purpose: the products seeded by V2 predate
      * the column, and a nullable column is what lets the migration ship before the code that fills
@@ -55,9 +72,11 @@ public class Product {
      * <p>No getter is exposed and nothing in the application ever reads it: it belongs to Hibernate,
      * and putting it in {@code ProductResponse} would leak a persistence detail into the API.
      *
-     * <p>Stock is the field that makes this necessary. Two concurrent orders for the last unit both
-     * read {@code stockQuantity = 1} and both write {@code 0} - a lost update, and the one anomaly
-     * READ COMMITTED does not prevent.
+     * <p>Stock used to be the field that made this necessary, and stock has gone to inventory-service
+     * - where an identical {@code @Version} column now guards the row that actually contends. This
+     * one is kept because concurrent catalogue edits are still a lost update waiting to happen: two
+     * administrators repricing the same product from the same stale read. It is much rarer, which is
+     * exactly the shape optimistic locking suits.
      */
     @Version
     @Column(nullable = false)
@@ -67,27 +86,10 @@ public class Product {
     protected Product() {
     }
 
-    public Product(String name, String description, BigDecimal price, int stockQuantity) {
+    public Product(String name, String description, BigDecimal price) {
         this.name = name;
         this.description = description;
         this.price = price;
-        this.stockQuantity = stockQuantity;
-    }
-
-    /**
-     * Reduces stock, refusing to go negative. Keeping this rule on the entity means no caller can
-     * accidentally oversell by writing the field directly.
-     */
-    public void reduceStock(int quantity) {
-        if (quantity > stockQuantity) {
-            throw new IllegalStateException(
-                    "Cannot reduce stock of '" + name + "' by " + quantity + "; only " + stockQuantity + " available");
-        }
-        this.stockQuantity -= quantity;
-    }
-
-    public boolean hasStockFor(int quantity) {
-        return stockQuantity >= quantity;
     }
 
     public Long getId() {
@@ -116,14 +118,6 @@ public class Product {
 
     public void setPrice(BigDecimal price) {
         this.price = price;
-    }
-
-    public int getStockQuantity() {
-        return stockQuantity;
-    }
-
-    public void setStockQuantity(int stockQuantity) {
-        this.stockQuantity = stockQuantity;
     }
 
     public String getCategory() {

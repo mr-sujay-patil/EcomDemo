@@ -1,4 +1,4 @@
-package com.ecomdemo.common;
+package com.ecomdemo.product;
 
 import java.util.Collection;
 import java.util.concurrent.Callable;

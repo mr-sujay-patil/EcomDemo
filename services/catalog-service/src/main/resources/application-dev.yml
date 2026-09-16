@@ -1,0 +1,31 @@
+# catalog-service against its own PostgreSQL database, and the only Redis in the system.
+spring:
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/ecomdemo_catalog}
+    username: ${POSTGRES_USER:ecomdemo}
+    password: ${POSTGRES_PASSWORD:ecomdemo}
+
+    hikari:
+      pool-name: CatalogServicePool
+      maximum-pool-size: 5
+      minimum-idle: 1
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  # Redis is a cache here, never a source of truth: everything in it can be rebuilt from PostgreSQL.
+  #
+  # It belongs to this service alone. Four services sharing one Redis would be four services sharing
+  # a datastore, which is the database-per-service rule broken by a side door - and the failure mode
+  # is worse than a shared database, because a cache has no schema to notice the collision.
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Fail fast rather than hang a request. A cache that is slow to answer is worse than one that
+      # is absent - the point of it was to be quicker than the database.
+      timeout: 2s
+      connect-timeout: 2s
+
+  cache:
+    type: redis

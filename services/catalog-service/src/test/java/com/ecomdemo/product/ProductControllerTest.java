@@ -3,7 +3,7 @@ package com.ecomdemo.product;
 import java.math.BigDecimal;
 import java.util.List;
 
-import com.ecomdemo.common.NotFoundException;
+import com.ecomdemo.shared.NotFoundException;
 import com.ecomdemo.product.dto.ProductRequest;
 import com.ecomdemo.product.dto.ProductResponse;
 
@@ -14,7 +14,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.test.context.support.WithMockUser;
 
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
-import com.ecomdemo.support.SecurityTestConfiguration;
+import com.ecomdemo.shared.testsupport.SecurityTestConfiguration;
 
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpStatus;
@@ -48,12 +48,21 @@ import static org.mockito.Mockito.verify;
  */
 @WebMvcTest(ProductController.class)
 /*
- * A @WebMvcTest slice loads controllers, not arbitrary @Configuration classes - so without this the
- * real rules never load, Boot's default security applies instead, and @AuthenticationPrincipal is
- * not even resolved (Spring MVC falls back to treating SecurityUser as a model attribute and tries
- * to construct one). Importing them means these tests exercise the authorization rules that ship.
+ * A @WebMvcTest slice loads controllers, not arbitrary @Configuration classes, and not
+ * auto-configurations beyond a short web-related list - so without these imports the real rules
+ * never load, Boot's default security applies instead, and @AuthenticationPrincipal is not even
+ * resolved (Spring MVC falls back to treating SecurityUser as a model attribute and tries to
+ * construct one).
+ *
+ * TWO imports since Phase 20, and the second is easy to forget. SecurityTestConfiguration brings the
+ * filter chain, which is shared by all five services; CatalogServiceAuthorizationRules brings the
+ * permitAll for GET /api/products, which is this service's alone. Without the second, the shared
+ * chain still loads and still works - it simply has no rule making anything public, so every
+ * anonymous read falls through to anyRequest().authenticated() and returns 401. The failure looks
+ * exactly like a broken authorization rule rather than a missing import, which is why it is worth a
+ * comment.
  */
-@Import(SecurityTestConfiguration.class)
+@Import({SecurityTestConfiguration.class, CatalogServiceAuthorizationRules.class})
 class ProductControllerTest {
 
     @Autowired
@@ -63,7 +72,7 @@ class ProductControllerTest {
     private ProductService productService;
 
     private static ProductResponse keyboard() {
-        return new ProductResponse(1L, "Mechanical Keyboard", "Hot-swappable", new BigDecimal("129.99"), 40, "Peripherals");
+        return new ProductResponse(1L, "Mechanical Keyboard", "Hot-swappable", new BigDecimal("129.99"), "Peripherals");
     }
 
     @Test
@@ -93,7 +102,10 @@ class ProductControllerTest {
                 // assertion is about the value, not about how JsonPath happened to parse it
                 .hasPathSatisfying("$.price",
                         price -> assertThat(price).convertTo(BIG_DECIMAL).isEqualByComparingTo("129.99"))
-                .hasPathSatisfying("$.stockQuantity", stock -> assertThat(stock).isEqualTo(40));
+                // No stockQuantity here any more, and its absence is the assertion: availability is
+                // inventory-service's answer to give, and this response is served from a cache that
+                // must never hold a number a checkout depends on.
+                .doesNotHavePath("$.stockQuantity");
     }
 
     @Test
@@ -132,7 +144,7 @@ class ProductControllerTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("""
                         {"name":"Mechanical Keyboard","description":"Hot-swappable",
-                         "price":129.99,"stockQuantity":40}"""))
+                         "price":129.99}"""))
                 .hasStatus(HttpStatus.CREATED)
                 .hasHeader("Location", "/api/products/1");
     }
@@ -144,7 +156,7 @@ class ProductControllerTest {
         assertThat(mvc.post().uri("/api/products")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("""
-                        {"name":"","price":-1,"stockQuantity":5}"""))
+                        {"name":"","price":-1}"""))
                 .hasStatus(HttpStatus.BAD_REQUEST)
                 .bodyJson()
                 .extractingPath("$.message").asString()
@@ -178,7 +190,7 @@ class ProductControllerTest {
         assertThat(mvc.put().uri("/api/products/1")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("""
-                        {"name":"Mechanical Keyboard","price":129.99,"stockQuantity":40}"""))
+                        {"name":"Mechanical Keyboard","price":129.99}"""))
                 .hasStatus(HttpStatus.OK)
                 .bodyJson()
                 .extractingPath("$.name").isEqualTo("Mechanical Keyboard");

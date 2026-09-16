@@ -4,7 +4,7 @@ import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 
-import com.ecomdemo.common.NotFoundException;
+import com.ecomdemo.shared.NotFoundException;
 import com.ecomdemo.product.dto.ProductRequest;
 import com.ecomdemo.product.dto.ProductResponse;
 import com.ecomdemo.support.TestFixtures;
@@ -47,8 +47,8 @@ class ProductServiceTest {
         void findAll_withProductsInTheCatalogue_returnsThemAsResponses() {
             // GIVEN
             given(productRepository.findAll()).willReturn(List.of(
-                    TestFixtures.product(1L, "Keyboard", "129.99", 40),
-                    TestFixtures.product(2L, "Mouse", "49.50", 120)));
+                    TestFixtures.product(1L, "Keyboard", "129.99"),
+                    TestFixtures.product(2L, "Mouse", "49.50")));
 
             // WHEN
             List<ProductResponse> found = productService.findAll();
@@ -75,7 +75,7 @@ class ProductServiceTest {
         void findById_whenTheProductExists_returnsIt() {
             // GIVEN
             given(productRepository.findById(1L))
-                    .willReturn(Optional.of(TestFixtures.product(1L, "Keyboard", "129.99", 40)));
+                    .willReturn(Optional.of(TestFixtures.product(1L, "Keyboard", "129.99")));
 
             // WHEN
             ProductResponse found = productService.findById(1L);
@@ -84,7 +84,6 @@ class ProductServiceTest {
             assertThat(found.id()).isEqualTo(1L);
             assertThat(found.name()).isEqualTo("Keyboard");
             assertThat(found.price()).isEqualByComparingTo("129.99");
-            assertThat(found.stockQuantity()).isEqualTo(40);
         }
 
         @Test
@@ -110,12 +109,11 @@ class ProductServiceTest {
 
             // WHEN
             ProductResponse created = productService.create(
-                    new ProductRequest("Webcam", "1080p", new BigDecimal("79.99"), 60, "Peripherals"));
+                    new ProductRequest("Webcam", "1080p", new BigDecimal("79.99"), "Peripherals"));
 
             // THEN
             assertThat(created.id()).isEqualTo(7L);
             assertThat(created.name()).isEqualTo("Webcam");
-            assertThat(created.stockQuantity()).isEqualTo(60);
         }
 
         @Test
@@ -126,7 +124,7 @@ class ProductServiceTest {
 
             // WHEN - 9.999 cannot be a real price
             ProductResponse created = productService.create(
-                    new ProductRequest("Sticker", null, new BigDecimal("9.999"), 10, null));
+                    new ProductRequest("Sticker", null, new BigDecimal("9.999"), null));
 
             // THEN - normalised on the way in, so the database never sees the extra digit
             assertThat(created.price()).isEqualByComparingTo("10.00");
@@ -140,12 +138,12 @@ class ProductServiceTest {
         @Test
         void update_whenTheProductExists_mutatesItWithoutCallingSave() {
             // GIVEN
-            Product existing = TestFixtures.product(1L, "Keyboard", "129.99", 40);
+            Product existing = TestFixtures.product(1L, "Keyboard", "129.99");
             given(productRepository.findById(1L)).willReturn(Optional.of(existing));
 
             // WHEN
             ProductResponse updated = productService.update(1L,
-                    new ProductRequest("Keyboard Pro", "Now with knobs", new BigDecimal("149.00"), 25, "Peripherals"));
+                    new ProductRequest("Keyboard Pro", "Now with knobs", new BigDecimal("149.00"), "Peripherals"));
 
             // THEN - the entity itself changed
             assertThat(updated.name()).isEqualTo("Keyboard Pro");
@@ -164,7 +162,7 @@ class ProductServiceTest {
             given(productRepository.findById(9999L)).willReturn(Optional.empty());
 
             // WHEN / THEN
-            ProductRequest request = new ProductRequest("Ghost", null, new BigDecimal("1.00"), 1, null);
+            ProductRequest request = new ProductRequest("Ghost", null, new BigDecimal("1.00"), null);
             assertThatThrownBy(() -> productService.update(9999L, request))
                     .isInstanceOf(NotFoundException.class)
                     .hasMessage("Product 9999 not found");
@@ -200,28 +198,16 @@ class ProductServiceTest {
         }
     }
 
-    @Nested
-    class RequireEntity {
-
-        @Test
-        void requireEntity_whenTheProductExists_returnsTheEntityNotADto() {
-            // GIVEN - this is the one method that deliberately leaks an entity, for the cart service
-            Product existing = TestFixtures.product(1L, "Keyboard", "129.99", 40);
-            given(productRepository.findById(1L)).willReturn(Optional.of(existing));
-
-            // WHEN / THEN
-            assertThat(productService.requireEntity(1L)).isSameAs(existing);
-        }
-
-        @Test
-        void requireEntity_whenTheProductIsMissing_throwsNotFound() {
-            // GIVEN
-            given(productRepository.findById(42L)).willReturn(Optional.empty());
-
-            // WHEN / THEN
-            assertThatThrownBy(() -> productService.requireEntity(42L))
-                    .isInstanceOf(NotFoundException.class)
-                    .hasMessage("Product 42 not found");
-        }
-    }
+    /*
+     * A RequireEntity group lived here until Phase 20, covering the one method that deliberately
+     * returned an entity rather than a DTO so that the cart and checkout could make stock decisions
+     * on a live, managed Product.
+     *
+     * The method is gone and could not survive the split: what made it useful was that the caller
+     * shared this service's transaction, and a caller in another process shares nothing. order-service
+     * reads prices over HTTP and gets an immutable snapshot, which is all a boundary can hand over.
+     *
+     * Deleting the tests with the method is the right move. Keeping them green against some
+     * replacement would have meant inventing a reason for the replacement to exist.
+     */
 }

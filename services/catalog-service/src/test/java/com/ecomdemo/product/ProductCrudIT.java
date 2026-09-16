@@ -2,10 +2,10 @@ package com.ecomdemo.product;
 
 import java.math.BigDecimal;
 
-import com.ecomdemo.common.ApiError;
+import com.ecomdemo.shared.ApiError;
 import com.ecomdemo.product.dto.ProductRequest;
 import com.ecomdemo.product.dto.ProductResponse;
-import com.ecomdemo.support.AbstractPostgresIT;
+import com.ecomdemo.support.AbstractCatalogServiceIT;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
@@ -26,10 +26,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>Nothing here assumes an empty table. Every integration test in this run shares one container,
  * and each one commits - so assertions are about the rows this test created, never about counts.
  */
-class ProductCrudIT extends AbstractPostgresIT {
+class ProductCrudIT extends AbstractCatalogServiceIT {
 
     private ProductRequest request(String name, String price, int stock, String category) {
-        return new ProductRequest(name, name + " description", new BigDecimal(price), stock, category);
+        return new ProductRequest(name, name + " description", new BigDecimal(price), category);
     }
 
     @Test
@@ -58,7 +58,6 @@ class ProductCrudIT extends AbstractPostgresIT {
 
         assertThat(fetched).isNotNull();
         assertThat(fetched.price()).isEqualByComparingTo("45.50");
-        assertThat(fetched.stockQuantity()).isEqualTo(12);
     }
 
     @Test
@@ -106,7 +105,6 @@ class ProductCrudIT extends AbstractPostgresIT {
         assertThat(fetched).isNotNull();
         assertThat(fetched.name()).isEqualTo("IT After");
         assertThat(fetched.price()).isEqualByComparingTo("20.00");
-        assertThat(fetched.stockQuantity()).isEqualTo(50);
         assertThat(fetched.category()).isEqualTo("New");
     }
 
@@ -142,7 +140,7 @@ class ProductCrudIT extends AbstractPostgresIT {
         // GIVEN a blank name and a negative price
         // WHEN / THEN the validation advice answers before anything reaches the database
         ApiError error = admin.post().uri("/api/products")
-                .body(new ProductRequest("", null, new BigDecimal("-1"), -5, null))
+                .body(new ProductRequest("", null, new BigDecimal("-1"), null))
                 .exchange()
                 .expectStatus().isBadRequest()
                 .expectBody(ApiError.class)
