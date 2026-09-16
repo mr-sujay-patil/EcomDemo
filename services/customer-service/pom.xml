@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.ecomdemo</groupId>
+        <artifactId>ecomdemo</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>customer-service</artifactId>
+    <name>customer-service</name>
+    <description>Accounts, registration, login, and the JWKS endpoint every other service verifies against</description>
+
+    <dependencies>
+        <!--
+            Web, JPA, security, JWT validation, Flyway, actuator and the shared error shape. One
+            dependency instead of eleven repeated in five POMs - and, more usefully, one place to
+            read what "an EcomDemo service" means.
+        -->
+        <dependency>
+            <groupId>com.ecomdemo</groupId>
+            <artifactId>shared-kernel</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+                Repackages the jar into an executable archive, and writes
+                target/classes/META-INF/build-info.properties so /actuator/info reports something.
+
+                Declared per service rather than on the parent on purpose: shared-kernel must NOT be
+                repackaged, because a Boot executable jar puts its classes under BOOT-INF/classes
+                where nothing can compile against them.
+            -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>build-info</id>
+                        <goals>
+                            <goal>build-info</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
