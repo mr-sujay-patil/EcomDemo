@@ -38,15 +38,32 @@ class MonitoringConfigurationTest {
     private static JsonNode dashboard;
     private static String dashboardJson;
 
+    /**
+     * Walks up from the module directory to the repository root.
+     *
+     * <p>Maven runs this from services/order-service, and compose.yaml and docker/ belong to no
+     * module. Hard-coding {@code ../../} would work until somebody moved the module.
+     */
+    private static Path repositoryRoot() {
+        Path candidate = Path.of("").toAbsolutePath();
+        while (candidate != null && !Files.exists(candidate.resolve("compose.yaml"))) {
+            candidate = candidate.getParent();
+        }
+        if (candidate == null) {
+            throw new IllegalStateException("Could not find the repository root");
+        }
+        return candidate;
+    }
+
     @BeforeAll
     @SuppressWarnings("unchecked")
     static void readTheFiles() throws IOException {
-        compose = new Yaml().load(Files.readString(Path.of("compose.yaml")));
-        prometheus = new Yaml().load(Files.readString(Path.of("docker/prometheus/prometheus.yml")));
-        alertRules = new Yaml().load(Files.readString(Path.of("docker/prometheus/alert-rules.yml")));
+        compose = new Yaml().load(Files.readString(repositoryRoot().resolve("compose.yaml")));
+        prometheus = new Yaml().load(Files.readString(repositoryRoot().resolve("docker/prometheus/prometheus.yml")));
+        alertRules = new Yaml().load(Files.readString(repositoryRoot().resolve("docker/prometheus/alert-rules.yml")));
         datasources = new Yaml().load(
-                Files.readString(Path.of("docker/grafana/provisioning/datasources/prometheus.yml")));
-        dashboardJson = Files.readString(Path.of("docker/grafana/dashboards/ecomdemo.json"));
+                Files.readString(repositoryRoot().resolve("docker/grafana/provisioning/datasources/prometheus.yml")));
+        dashboardJson = Files.readString(repositoryRoot().resolve("docker/grafana/dashboards/ecomdemo.json"));
         dashboard = new ObjectMapper().readTree(dashboardJson);
     }
 
@@ -71,9 +88,20 @@ class MonitoringConfigurationTest {
             List<Map<String, Object>> statics = (List<Map<String, Object>>) app.get("static_configs");
             List<String> targets = (List<String>) statics.get(0).get("targets");
 
-            // THEN - localhost inside the Prometheus container is Prometheus, and the app would
-            // simply never be scraped. The graphs would be empty, with no error anywhere.
-            assertThat(targets).containsExactly("app:8080");
+            // THEN all five, by service name - localhost inside the Prometheus container is
+            // Prometheus, and the services would simply never be scraped. The graphs would be empty,
+            // with no error anywhere.
+            //
+            // Five targets under one job rather than five jobs: Prometheus labels each series with
+            // the instance it scraped, and shared-kernel stamps an `application` tag on every meter,
+            // so they stay distinguishable either way. A missing target here is a service whose
+            // dashboard panels are blank while everything appears to work.
+            assertThat(targets).containsExactlyInAnyOrder(
+                    "customer-service:8081",
+                    "catalog-service:8082",
+                    "inventory-service:8083",
+                    "order-service:8084",
+                    "notification-service:8085");
             assertThat(app.get("metrics_path"))
                     .as("Actuator does not serve the exposition format on Prometheus's default /metrics")
                     .isEqualTo("/actuator/prometheus");
@@ -89,7 +117,8 @@ class MonitoringConfigurationTest {
             // file is valid, the rule is correct, and it is never evaluated.
             assertThat(ruleFiles).isNotEmpty();
             assertThat(ruleFiles).allSatisfy(file ->
-                    assertThat(Path.of("docker/prometheus", Path.of(file).getFileName().toString()))
+                    assertThat(repositoryRoot().resolve("docker/prometheus")
+                            .resolve(Path.of(file).getFileName().toString()))
                             .as("rule_files entry %s must exist in the repository", file)
                             .exists());
         }
@@ -202,16 +231,23 @@ class MonitoringConfigurationTest {
         @SuppressWarnings("unchecked")
         void compose_always_startsGrafanaAfterPrometheusAndPrometheusAfterTheApp() {
             // GIVEN the dependency edges
-            Map<String, Object> promDeps = (Map<String, Object>) service("prometheus").get("depends_on");
             Map<String, Object> grafanaDeps = (Map<String, Object>) service("grafana").get("depends_on");
 
-            // THEN each waits for healthy, not merely started - the same lesson as Phase 10's
-            // database. A Grafana that starts before Prometheus answers provisions a data source it
-            // cannot reach.
-            assertThat((Map<String, Object>) promDeps.get("app"))
-                    .containsEntry("condition", "service_healthy");
+            // THEN Grafana waits for Prometheus to be healthy, not merely started - the same lesson
+            // as Phase 10's database. A Grafana that starts before Prometheus answers provisions a
+            // data source it cannot reach.
             assertThat((Map<String, Object>) grafanaDeps.get("prometheus"))
                     .containsEntry("condition", "service_healthy");
+
+            // AND Prometheus waits for nothing.
+            //
+            // It used to wait for `app`. Waiting for all five services would make the monitoring
+            // stack unavailable exactly when it is most wanted - while something is failing to start
+            // - and Prometheus is built for targets that are down: it records `up == 0` and carries
+            // on, which is the signal you actually want at that moment.
+            assertThat(service("prometheus"))
+                    .as("prometheus must not wait for the services it monitors")
+                    .doesNotContainKey("depends_on");
         }
 
         @Test
@@ -233,8 +269,8 @@ class MonitoringConfigurationTest {
         void composeAndDashboards_always_carryNoLiteralPassword() throws IOException {
             // GIVEN every file this phase added, plus compose
             List<Path> files = Stream.concat(
-                            Stream.of(Path.of("compose.yaml")),
-                            Files.walk(Path.of("docker")).filter(Files::isRegularFile))
+                            Stream.of(repositoryRoot().resolve("compose.yaml")),
+                            Files.walk(repositoryRoot().resolve("docker")).filter(Files::isRegularFile))
                     .toList();
 
             // THEN none of them carries a committed secret.
@@ -248,12 +284,12 @@ class MonitoringConfigurationTest {
         @Test
         void envExample_always_documentsTheGrafanaPassword() throws IOException {
             // GIVEN .env.example, the file a new clone copies
-            String example = Files.readString(Path.of(".env.example"));
+            String example = Files.readString(repositoryRoot().resolve(".env.example"));
 
             // THEN the variable compose demands is named there, or the stack refuses to start with
             // a message about a variable nobody has heard of.
             assertThat(example).contains("GRAFANA_PASSWORD=");
-            assertThat(Files.readString(Path.of(".gitignore"))).contains(".env");
+            assertThat(Files.readString(repositoryRoot().resolve(".gitignore"))).contains(".env");
         }
     }
 }

@@ -1,8 +1,22 @@
-# The whole system: the application and the database it needs, started together.
+# The whole system: five services, the infrastructure they need, started together.
 #
-# `docker compose up` replaces every manual step the README has accumulated since Phase 4 - no
-# `docker run` to remember, no locally installed PostgreSQL, no waiting to see whether the database
-# was ready before starting the app.
+# WHAT PHASE 20 CHANGED
+#
+# `app` is gone. In its place are five services on ports 8081-8085, each with its own image built
+# from the same parameterised Dockerfile, its own database on the shared PostgreSQL server, and its
+# own environment. Port 8080 is deliberately unused - it belonged to the monolith and will belong to
+# the API gateway in Phase 21.
+#
+# The observability stack (prometheus, grafana, kafka-ui) sits behind a compose PROFILE, so the
+# default `up` starts what the purchase flow needs and nothing else:
+#
+#   docker compose up -d --build                          # 8 containers: 5 services + postgres, redis, kafka
+#   docker compose --profile observability up -d --build  # 11 containers, with Phase 15's dashboard
+#
+# That is not tidiness. Phase 17 measured this Docker VM at 4.1 GB and found Kafka thrashing at 428%
+# CPU when four unconstrained JVMs shared it; there are now six JVMs in the default set and nine with
+# observability on. Every one of them has a memory limit for that reason, and -XX:MaxRAMPercentage in
+# the Dockerfile is what turns a limit into a heap ceiling.
 
 name: ecomdemo
 
@@ -18,6 +32,14 @@ services:
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - copy .env.example}"
 
     volumes:
+      # One database per service, created the first time this volume is initialised. Scripts here run
+      # only when the data directory is empty, so changing the script later means `down -v`.
+      #
+      # This mount is where "database per service" stops being a convention: PostgreSQL cannot join
+      # or transact across databases, so the boundary is enforced by the engine rather than by code
+      # review. See the script for why five databases rather than five containers.
+      - ./docker/postgres/init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh:ro
+
       # A named volume, managed by Docker and living outside the container's writable layer.
       #
       # Everything a container writes to its own filesystem dies with the container, and `docker
@@ -29,10 +51,12 @@ services:
       # that every older example uses. Mounting the old path succeeds and silently persists nothing.
       - pgdata:/var/lib/postgresql
 
-    # No published port. The application reaches this database over the compose network, not through
-    # the host - see the app's POSTGRES_URL below. Publishing it would also collide with the
-    # standalone container from Phase 4 if that is still running. To inspect it from DBeaver, add:
+    # No published port. The services reach this database over the compose network, not through the
+    # host. To inspect it from DBeaver, add:
     #   ports: ["5432:5432"]
+    #
+    # To look at one service's data:
+    #   docker compose exec postgres psql -U ecomdemo -d ecomdemo_order -c '\\dt'
     healthcheck:
       # pg_isready asks the server whether it is accepting connections. The point is the app's
       # depends_on below: without it, compose starts both at once, the application wins the race,
@@ -79,86 +103,375 @@ services:
       start_period: 5s
     restart: unless-stopped
 
-  app:
+  customer-service:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Which module's jar goes into this image. One Dockerfile, five images - see its header.
+        SERVICE: customer-service
 
     depends_on:
       postgres:
-        # Not just "started" - "started and answering". This is the single most valuable line in the
-        # file, and the default (service_started) is what makes people add sleeps to entrypoints.
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      kafka:
-        # The application publishes on checkout and consumes into the notification table, so a
-        # broker that is not answering yet means a checkout whose event goes nowhere. Waiting for
-        # healthy rather than started is what makes the first order after `up` behave like the
-        # hundredth.
+        # Not just "started" - "started and answering". The default (service_started) is what makes
+        # people add sleeps to entrypoints.
         condition: service_healthy
 
     environment:
       # postgres, not localhost.
       #
       # Every container gets its own network namespace, so localhost inside this container is this
-      # container - there is no database there. Compose puts both services on one network and runs a
-      # DNS server that resolves each service name to its container's address, so `postgres` is the
-      # hostname and 5432 is the port *inside* that container, published or not.
-      POSTGRES_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-ecomdemo}
+      # container - there is no database there. Compose puts every service on one network and runs a
+      # DNS server that resolves each service name to its container's address.
+      #
+      # Note the database NAME: each service has its own. That is the whole of database-per-service
+      # in this stack - PostgreSQL cannot join or transact across databases, so the boundary holds
+      # whatever the application code tries to do.
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/ecomdemo_customer
       POSTGRES_USER: ${POSTGRES_USER:-ecomdemo}
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - copy .env.example}"
 
-      # redis, not localhost - the same container-networking rule as the database.
-      SPRING_DATA_REDIS_HOST: redis
-      SPRING_DATA_REDIS_PORT: "6379"
-
-      # kafka, not localhost - and 9092 is the port inside that container, which is not published.
-      # This is the bootstrap address only: the client asks it which broker leads which partition
-      # and is answered with the ADVERTISED_LISTENERS value, so both names have to resolve on this
-      # network.
-      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-
-      # Without this the application generates a random signing key on every start, so every restart
-      # invalidates every token that was issued before it (Phase 9).
-      # Quoted: the message contains ": ", and an unquoted YAML scalar containing that
-      # is parsed as a mapping.
-      JWT_SECRET: "${JWT_SECRET:?set JWT_SECRET in .env - generate one with openssl rand -base64 48}"
+      # The RSA private key that signs every token in the system, PKCS#8 PEM.
+      #
+      # This replaced JWT_SECRET in Phase 20, and it is why this service is the only one holding a
+      # secret at all. With HS256 the key that verifies a token is the key that signs one, so all
+      # five would have needed it - and notification-service holding the means to mint an admin token
+      # is not a system anybody should design. Only this service can sign now; the other four fetch
+      # the public half from JWKS_URI.
+      #
+      # Unset, the service generates a keypair at startup and logs a warning, so a fresh clone works
+      # with no setup. Generate a real one with:
+      #   openssl genpkey -algorithm RSA -pkcs8 -pkeyopt rsa_keygen_bits:2048
+      JWT_PRIVATE_KEY: "${JWT_PRIVATE_KEY:-}"
 
     ports:
-      # host:container. The only port this system exposes to the outside world.
-      - "8080:8080"
+      # host:container, and the same number on both sides so the URLs in the README are the URLs
+      # inside the network too. Published only until Phase 21 puts a gateway in front of everything.
+      - "8081:8081"
 
-    # A memory limit, so -XX:MaxRAMPercentage in the Dockerfile has something to be a percentage of.
-    # Unlimited is the default, and then the JVM sizes its heap against the whole host.
     deploy:
       resources:
         limits:
-          memory: 768M
+          # Six JVMs on one Docker VM. Without a limit each one sizes its heap against the whole
+          # machine, which is how Phase 17's stack ended up thrashing at 428% CPU on an idle broker.
+          memory: 384M
 
     healthcheck:
-      # The readiness probe, now that Phase 15 has one.
-      #
-      # This is a better question than the old GET /api/products. That asked "can you serve a
-      # request?" and answered it by doing real work; this asks the application itself whether it
-      # considers itself able to take traffic, and the readiness group is defined to include the
-      # database and Redis. A 503 here means the app is running but cannot serve - exactly the state
-      # compose should not call healthy.
-      #
-      # Liveness is deliberately NOT used here: it excludes dependencies by design, so it would
-      # report healthy while the database was unreachable.
+      # The readiness probe: does this service consider itself able to take traffic? It includes the
+      # database. Liveness is deliberately NOT used here - it excludes dependencies by design, so it
+      # would report healthy while the database was unreachable.
       #
       # wget comes from busybox in the Alpine base - no extra package, and no curl in the image.
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/actuator/health/readiness || exit 1"]
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8081/actuator/health/readiness || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 5
       # Generous: a cold JVM plus Flyway migrations on a new database.
-      start_period: 45s
+      start_period: 60s
+
+    restart: unless-stopped
+
+  catalog-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Which module's jar goes into this image. One Dockerfile, five images - see its header.
+        SERVICE: catalog-service
+
+    depends_on:
+      postgres:
+        # Not just "started" - "started and answering". The default (service_started) is what makes
+        # people add sleeps to entrypoints.
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    environment:
+      # postgres, not localhost.
+      #
+      # Every container gets its own network namespace, so localhost inside this container is this
+      # container - there is no database there. Compose puts every service on one network and runs a
+      # DNS server that resolves each service name to its container's address.
+      #
+      # Note the database NAME: each service has its own. That is the whole of database-per-service
+      # in this stack - PostgreSQL cannot join or transact across databases, so the boundary holds
+      # whatever the application code tries to do.
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/ecomdemo_catalog
+      POSTGRES_USER: ${POSTGRES_USER:-ecomdemo}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - copy .env.example}"
+
+      # Where this service fetches the public key it validates tokens with.
+      #
+      # Fetched once, lazily, on the first token it has to check, and then cached - so this is not a
+      # per-request dependency on customer-service, and this service keeps authorizing requests for
+      # as long as it is up even if customer-service is not.
+      JWKS_URI: http://customer-service:8081/.well-known/jwks.json
+
+      # redis, not localhost - the same container-networking rule as the database.
+      #
+      # Only this service has a cache, and that is deliberate: the catalogue is read constantly,
+      # written rarely, and nothing it serves feeds a decision. Stock does, and lives elsewhere with
+      # no cache at all.
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: "6379"
+
+    ports:
+      # host:container, and the same number on both sides so the URLs in the README are the URLs
+      # inside the network too. Published only until Phase 21 puts a gateway in front of everything.
+      - "8082:8082"
+
+    deploy:
+      resources:
+        limits:
+          # Six JVMs on one Docker VM. Without a limit each one sizes its heap against the whole
+          # machine, which is how Phase 17's stack ended up thrashing at 428% CPU on an idle broker.
+          memory: 384M
+
+    healthcheck:
+      # The readiness probe: does this service consider itself able to take traffic? It includes the
+      # database. Liveness is deliberately NOT used here - it excludes dependencies by design, so it
+      # would report healthy while the database was unreachable.
+      #
+      # wget comes from busybox in the Alpine base - no extra package, and no curl in the image.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8082/actuator/health/readiness || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      # Generous: a cold JVM plus Flyway migrations on a new database.
+      start_period: 60s
+
+    restart: unless-stopped
+
+  inventory-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Which module's jar goes into this image. One Dockerfile, five images - see its header.
+        SERVICE: inventory-service
+
+    depends_on:
+      postgres:
+        # Not just "started" - "started and answering". The default (service_started) is what makes
+        # people add sleeps to entrypoints.
+        condition: service_healthy
+
+    environment:
+      # postgres, not localhost.
+      #
+      # Every container gets its own network namespace, so localhost inside this container is this
+      # container - there is no database there. Compose puts every service on one network and runs a
+      # DNS server that resolves each service name to its container's address.
+      #
+      # Note the database NAME: each service has its own. That is the whole of database-per-service
+      # in this stack - PostgreSQL cannot join or transact across databases, so the boundary holds
+      # whatever the application code tries to do.
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/ecomdemo_inventory
+      POSTGRES_USER: ${POSTGRES_USER:-ecomdemo}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - copy .env.example}"
+
+      # Where this service fetches the public key it validates tokens with.
+      #
+      # Fetched once, lazily, on the first token it has to check, and then cached - so this is not a
+      # per-request dependency on customer-service, and this service keeps authorizing requests for
+      # as long as it is up even if customer-service is not.
+      JWKS_URI: http://customer-service:8081/.well-known/jwks.json
+
+    ports:
+      # host:container, and the same number on both sides so the URLs in the README are the URLs
+      # inside the network too. Published only until Phase 21 puts a gateway in front of everything.
+      - "8083:8083"
+
+    deploy:
+      resources:
+        limits:
+          # Six JVMs on one Docker VM. Without a limit each one sizes its heap against the whole
+          # machine, which is how Phase 17's stack ended up thrashing at 428% CPU on an idle broker.
+          memory: 384M
+
+    healthcheck:
+      # The readiness probe: does this service consider itself able to take traffic? It includes the
+      # database. Liveness is deliberately NOT used here - it excludes dependencies by design, so it
+      # would report healthy while the database was unreachable.
+      #
+      # wget comes from busybox in the Alpine base - no extra package, and no curl in the image.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8083/actuator/health/readiness || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      # Generous: a cold JVM plus Flyway migrations on a new database.
+      start_period: 60s
+
+    restart: unless-stopped
+
+  order-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Which module's jar goes into this image. One Dockerfile, five images - see its header.
+        SERVICE: order-service
+
+    depends_on:
+      postgres:
+        # Not just "started" - "started and answering". The default (service_started) is what makes
+        # people add sleeps to entrypoints.
+        condition: service_healthy
+      kafka:
+        # This service speaks to the broker, so a broker that is not answering yet means a first
+        # order whose event goes nowhere. Waiting for healthy rather than started is what makes the
+        # first order after `up` behave like the hundredth.
+        condition: service_healthy
+      catalog-service:
+        # A hard dependency: checkout cannot price a cart without it.
+        #
+        # depends_on only orders STARTUP. It does nothing at runtime - if catalog-service falls over
+        # an hour later, order-service keeps running and checkouts fail with a 409 that says so.
+        # Startup ordering is the easy half of a dependency; the hard half is in the code.
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+
+    environment:
+      # postgres, not localhost.
+      #
+      # Every container gets its own network namespace, so localhost inside this container is this
+      # container - there is no database there. Compose puts every service on one network and runs a
+      # DNS server that resolves each service name to its container's address.
+      #
+      # Note the database NAME: each service has its own. That is the whole of database-per-service
+      # in this stack - PostgreSQL cannot join or transact across databases, so the boundary holds
+      # whatever the application code tries to do.
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/ecomdemo_order
+      POSTGRES_USER: ${POSTGRES_USER:-ecomdemo}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - copy .env.example}"
+
+      # Where this service fetches the public key it validates tokens with.
+      #
+      # Fetched once, lazily, on the first token it has to check, and then cached - so this is not a
+      # per-request dependency on customer-service, and this service keeps authorizing requests for
+      # as long as it is up even if customer-service is not.
+      JWKS_URI: http://customer-service:8081/.well-known/jwks.json
+
+      # kafka, not localhost - and 9092 is the port inside that container, which is not published.
+      # This is the bootstrap address only: the client asks it which broker leads which partition and
+      # is answered with the ADVERTISED_LISTENERS value, so both names have to resolve on this network.
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+
+      # Where the neighbours live. Service names on the compose network, resolved by compose's DNS -
+      # which is all the service discovery this stack needs, and stops being enough the moment there
+      # is more than one instance of catalog-service to choose between.
+      CATALOG_BASE_URL: http://catalog-service:8082
+      INVENTORY_BASE_URL: http://inventory-service:8083
+
+    ports:
+      # host:container, and the same number on both sides so the URLs in the README are the URLs
+      # inside the network too. Published only until Phase 21 puts a gateway in front of everything.
+      - "8084:8084"
+
+    deploy:
+      resources:
+        limits:
+          # Six JVMs on one Docker VM. Without a limit each one sizes its heap against the whole
+          # machine, which is how Phase 17's stack ended up thrashing at 428% CPU on an idle broker.
+          memory: 448M
+
+    healthcheck:
+      # The readiness probe: does this service consider itself able to take traffic? It includes the
+      # database. Liveness is deliberately NOT used here - it excludes dependencies by design, so it
+      # would report healthy while the database was unreachable.
+      #
+      # wget comes from busybox in the Alpine base - no extra package, and no curl in the image.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8084/actuator/health/readiness || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      # Generous: a cold JVM plus Flyway migrations on a new database.
+      start_period: 60s
+
+    restart: unless-stopped
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Which module's jar goes into this image. One Dockerfile, five images - see its header.
+        SERVICE: notification-service
+
+    depends_on:
+      postgres:
+        # Not just "started" - "started and answering". The default (service_started) is what makes
+        # people add sleeps to entrypoints.
+        condition: service_healthy
+      kafka:
+        # This service speaks to the broker, so a broker that is not answering yet means a first
+        # order whose event goes nowhere. Waiting for healthy rather than started is what makes the
+        # first order after `up` behave like the hundredth.
+        condition: service_healthy
+
+    environment:
+      # postgres, not localhost.
+      #
+      # Every container gets its own network namespace, so localhost inside this container is this
+      # container - there is no database there. Compose puts every service on one network and runs a
+      # DNS server that resolves each service name to its container's address.
+      #
+      # Note the database NAME: each service has its own. That is the whole of database-per-service
+      # in this stack - PostgreSQL cannot join or transact across databases, so the boundary holds
+      # whatever the application code tries to do.
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/ecomdemo_notification
+      POSTGRES_USER: ${POSTGRES_USER:-ecomdemo}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - copy .env.example}"
+
+      # Where this service fetches the public key it validates tokens with.
+      #
+      # Fetched once, lazily, on the first token it has to check, and then cached - so this is not a
+      # per-request dependency on customer-service, and this service keeps authorizing requests for
+      # as long as it is up even if customer-service is not.
+      JWKS_URI: http://customer-service:8081/.well-known/jwks.json
+
+      # kafka, not localhost - and 9092 is the port inside that container, which is not published.
+      # This is the bootstrap address only: the client asks it which broker leads which partition and
+      # is answered with the ADVERTISED_LISTENERS value, so both names have to resolve on this network.
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+
+    ports:
+      # host:container, and the same number on both sides so the URLs in the README are the URLs
+      # inside the network too. Published only until Phase 21 puts a gateway in front of everything.
+      - "8085:8085"
+
+    deploy:
+      resources:
+        limits:
+          # Six JVMs on one Docker VM. Without a limit each one sizes its heap against the whole
+          # machine, which is how Phase 17's stack ended up thrashing at 428% CPU on an idle broker.
+          memory: 384M
+
+    healthcheck:
+      # The readiness probe: does this service consider itself able to take traffic? It includes the
+      # database. Liveness is deliberately NOT used here - it excludes dependencies by design, so it
+      # would report healthy while the database was unreachable.
+      #
+      # wget comes from busybox in the Alpine base - no extra package, and no curl in the image.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8085/actuator/health/readiness || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      # Generous: a cold JVM plus Flyway migrations on a new database.
+      start_period: 60s
 
     restart: unless-stopped
 
   prometheus:
+    # Behind a profile: `docker compose --profile observability up -d`.
+    #
+    # Phase 15's dashboard is not part of the purchase flow, and three more JVMs on a 4 GB Docker VM
+    # that already runs six is the difference between a stack that idles and one that swaps. Opting
+    # in costs one flag and is the honest default once the service count went from one to five.
+    profiles: ["observability"]
+
     image: prom/prometheus:v3.5.5
     # The LTS line. Pinned to an exact patch: `latest` means the stack you debug on Monday is not
     # the stack you deployed on Friday.
@@ -184,9 +497,9 @@ services:
       # deployment this stays on the internal network and only Grafana talks to it.
       - "9090:9090"
 
-    depends_on:
-      app:
-        condition: service_healthy
+    # No depends_on any more. It used to wait for `app`; waiting for all five services would make
+    # the monitoring stack unavailable exactly when it is most wanted - while something is failing to
+    # start. Prometheus reports a target as down and carries on, which is what it is for.
 
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
@@ -198,6 +511,13 @@ services:
     restart: unless-stopped
 
   grafana:
+    # Behind a profile: `docker compose --profile observability up -d`.
+    #
+    # Phase 15's dashboard is not part of the purchase flow, and three more JVMs on a 4 GB Docker VM
+    # that already runs six is the difference between a stack that idles and one that swaps. Opting
+    # in costs one flag and is the honest default once the service count went from one to five.
+    profiles: ["observability"]
+
     image: grafana/grafana:13.2.2
 
     environment:
@@ -347,6 +667,13 @@ services:
     restart: unless-stopped
 
   kafka-ui:
+    # Behind a profile: `docker compose --profile observability up -d`.
+    #
+    # Phase 15's dashboard is not part of the purchase flow, and three more JVMs on a 4 GB Docker VM
+    # that already runs six is the difference between a stack that idles and one that swaps. Opting
+    # in costs one flag and is the honest default once the service count went from one to five.
+    profiles: ["observability"]
+
     # kafbat's fork, which is the maintained one - provectuslabs/kafka-ui has been archived since
     # 2023 and its last tag predates KRaft-only Kafka entirely.
     image: ghcr.io/kafbat/kafka-ui:v1.5.0
@@ -360,10 +687,12 @@ services:
       JAVA_OPTS: -Xms128m -Xmx256m
 
     ports:
-      # 8081, because the application already owns 8080. Read-only inspection: topics, partitions,
-      # offsets, consumer-group lag, and the messages themselves - including whatever is sitting in
-      # the dead-letter topic.
-      - "8081:8080"
+      # 8086, NOT 8081. Phase 20 gave 8081 to customer-service, and a port collision in compose is a
+      # container that exits with a one-line error most people scroll past.
+      #
+      # Read-only inspection: topics, partitions, offsets, consumer-group lag, and the messages
+      # themselves - including whatever is sitting in the dead-letter topic.
+      - "8086:8080"
 
     depends_on:
       kafka:

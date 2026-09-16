@@ -7,9 +7,11 @@
 # The frontend is not part of this image.
 frontend/
 
-# Build output. The image builds its own inside the build stage; copying a host-built target/ in
-# would also make the image depend on whatever JDK happened to be on the developer's machine.
+# Build output, at every level of the reactor. The image builds its own inside the build stage;
+# copying a host-built target/ in would also make the image depend on whatever JDK happened to be on
+# the developer's machine. The ** form matters now that there are seven of them.
 target/
+**/target/
 out/
 
 # History and tooling.

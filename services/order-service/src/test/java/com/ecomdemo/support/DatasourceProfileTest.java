@@ -1,4 +1,4 @@
-package com.ecomdemo.common;
+package com.ecomdemo.support;
 
 import javax.sql.DataSource;
 
@@ -25,6 +25,21 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>No database is contacted. HikariCP opens no connection until one is requested, so this stays a
  * fast unit-level test that needs neither PostgreSQL nor a network.
+ *
+ * <h2>What Phase 20 changed</h2>
+ *
+ * The values, not the reasoning. Each of the five services has its own {@code application-dev.yml}
+ * naming its own database and its own pool, and this class covers order-service's. The pool is
+ * five connections rather than the monolith's ten, which is the arithmetic that matters once there
+ * are five pools sharing one PostgreSQL: the server's own default limit is 100 for everything, and
+ * five services times ten would be half of it held open by a demo.
+ *
+ * <p>The other four services are not covered here and deliberately not: a copy of this class per
+ * service would be four more places to update and three of them would drift. Their connection
+ * settings are exercised by their own integration tests, which fail to start if the datasource is
+ * wrong. What this class adds over that is the check on the <em>defaults</em> - the values used when
+ * no environment variable is set - which no container test can see, because Testcontainers replaces
+ * them.
  */
 class DatasourceProfileTest {
 
@@ -43,7 +58,7 @@ class DatasourceProfileTest {
                 // THEN the committed defaults apply, and they point at a local PostgreSQL
                 assertThat(context).hasSingleBean(DataSource.class);
                 HikariDataSource dataSource = context.getBean(HikariDataSource.class);
-                assertThat(dataSource.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:5432/ecomdemo");
+                assertThat(dataSource.getJdbcUrl()).isEqualTo("jdbc:postgresql://localhost:5432/ecomdemo_order");
                 assertThat(dataSource.getUsername()).isEqualTo("ecomdemo");
             });
         }
@@ -73,9 +88,15 @@ class DatasourceProfileTest {
                 // THEN the pool carries the sizes chosen in application-dev.yml rather than Hikari's
                 // own defaults (a pool named "HikariPool-1" sized to 10 with minimumIdle == maximum).
                 HikariDataSource dataSource = context.getBean(HikariDataSource.class);
-                assertThat(dataSource.getPoolName()).isEqualTo("EcomDemoPool");
-                assertThat(dataSource.getMaximumPoolSize()).isEqualTo(10);
-                assertThat(dataSource.getMinimumIdle()).isEqualTo(2);
+                assertThat(dataSource.getPoolName()).isEqualTo("OrderServicePool");
+                assertThat(dataSource.getMaximumPoolSize())
+                        // Five, not the monolith's ten. There are five pools against one PostgreSQL
+                        // now, and the server's own default limit is 100 connections for everything.
+                        .isEqualTo(5);
+                assertThat(dataSource.getMinimumIdle())
+                        // One, not two: five services each keeping two warm is ten idle
+                        // connections held against a server with 100 in total.
+                        .isEqualTo(1);
                 assertThat(dataSource.getConnectionTimeout()).isEqualTo(30_000);
                 assertThat(dataSource.getIdleTimeout()).isEqualTo(600_000);
                 assertThat(dataSource.getMaxLifetime()).isEqualTo(1_800_000);
