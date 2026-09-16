@@ -110,7 +110,7 @@ class ProductServiceTest {
 
             // WHEN
             ProductResponse created = productService.create(
-                    new ProductRequest("Webcam", "1080p", new BigDecimal("79.99"), 60));
+                    new ProductRequest("Webcam", "1080p", new BigDecimal("79.99"), 60, "Peripherals"));
 
             // THEN
             assertThat(created.id()).isEqualTo(7L);
@@ -126,7 +126,7 @@ class ProductServiceTest {
 
             // WHEN - 9.999 cannot be a real price
             ProductResponse created = productService.create(
-                    new ProductRequest("Sticker", null, new BigDecimal("9.999"), 10));
+                    new ProductRequest("Sticker", null, new BigDecimal("9.999"), 10, null));
 
             // THEN - normalised on the way in, so the database never sees the extra digit
             assertThat(created.price()).isEqualByComparingTo("10.00");
@@ -145,7 +145,7 @@ class ProductServiceTest {
 
             // WHEN
             ProductResponse updated = productService.update(1L,
-                    new ProductRequest("Keyboard Pro", "Now with knobs", new BigDecimal("149.00"), 25));
+                    new ProductRequest("Keyboard Pro", "Now with knobs", new BigDecimal("149.00"), 25, "Peripherals"));
 
             // THEN - the entity itself changed
             assertThat(updated.name()).isEqualTo("Keyboard Pro");
@@ -165,7 +165,7 @@ class ProductServiceTest {
 
             // WHEN / THEN
             assertThatThrownBy(() -> productService.update(9999L,
-                    new ProductRequest("Ghost", null, new BigDecimal("1.00"), 1)))
+                    new ProductRequest("Ghost", null, new BigDecimal("1.00"), 1, null)))
                     .isInstanceOf(NotFoundException.class)
                     .hasMessage("Product 9999 not found");
             verify(productRepository, never()).save(any());

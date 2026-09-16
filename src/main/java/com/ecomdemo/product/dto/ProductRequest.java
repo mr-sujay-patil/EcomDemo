@@ -30,5 +30,13 @@ public record ProductRequest(
 
         @NotNull(message = "is required")
         @PositiveOrZero(message = "must not be negative")
-        Integer stockQuantity) {
+        Integer stockQuantity,
+
+        /*
+         * Optional, matching the nullable column V3 added. No @NotBlank: a client that has never
+         * heard of categories must keep working exactly as it did before, which is the whole point
+         * of shipping the column nullable.
+         */
+        @Size(max = 100, message = "must be at most 100 characters")
+        String category) {
 }

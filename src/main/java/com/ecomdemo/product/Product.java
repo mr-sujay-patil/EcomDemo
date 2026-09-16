@@ -37,6 +37,15 @@ public class Product {
     @Column(name = "stock_quantity", nullable = false)
     private int stockQuantity;
 
+    /**
+     * Added by V3__add_product_category.sql. Nullable on purpose: the products seeded by V2 predate
+     * the column, and a nullable column is what lets the migration ship before the code that fills
+     * it. Left as a plain String rather than an enum while there is no fixed set of categories to
+     * enforce - an enum would turn every new category into a code change and a redeploy.
+     */
+    @Column(length = 100)
+    private String category;
+
     /** JPA requires a no-arg constructor to instantiate the entity through reflection. */
     protected Product() {
     }
@@ -98,5 +107,13 @@ public class Product {
 
     public void setStockQuantity(int stockQuantity) {
         this.stockQuantity = stockQuantity;
+    }
+
+    public String getCategory() {
+        return category;
+    }
+
+    public void setCategory(String category) {
+        this.category = category;
     }
 }
