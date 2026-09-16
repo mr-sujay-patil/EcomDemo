@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Conventions for this repository. Read this before making changes.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## What this project is
 
@@ -11,8 +11,11 @@ The purpose is understanding, not shipping a product. That constraint drives eve
 is written to be read and explained, and a phase never "sneaks in" a technology that belongs to a
 later one.
 
-- **Roadmap (all 31 phases):** [`docs/ROADMAP.md`](docs/ROADMAP.md)
-- **Decision log (why things are the way they are):** [`docs/decisions.md`](docs/decisions.md)
+- **Roadmap (all 31 phases) and the Progress Tracker that says which are done:**
+  [`docs/ROADMAP.md`](docs/ROADMAP.md) — check the tracker before starting work; it is the source of
+  truth for which phase is next.
+- **Decision log (why things are the way they are):** [`docs/decisions.md`](docs/decisions.md) — read
+  the entries for the current phase before changing anything they cover.
 
 ## Stack
 
@@ -31,8 +34,76 @@ later one.
 ./mvnw spring-boot:run    # start on http://localhost:8080
 ```
 
+Running a subset:
+
+```bash
+./mvnw test -Dtest=CartServiceTest                  # one class, nested groups included
+./mvnw test -Dtest='CartServiceTest$AddItem'        # one @Nested group - note the $
+./mvnw test -Dtest='CartServiceTest*#addItem_*'     # one method or pattern
+./mvnw test -Dtest='*ServiceTest'                   # the unit layer
+./mvnw test -Dtest='*ControllerTest'                # the HTTP contract
+./mvnw test -Dtest='*RepositoryTest'                # the hand-written JPQL
+```
+
+The `*` before `#` is not optional: service tests group their cases in `@Nested` classes, and
+`-Dtest='CartServiceTest#addItem_*'` silently matches **zero** tests and still reports BUILD SUCCESS.
+
+While the app runs, the H2 console is at <http://localhost:8080/h2-console> — JDBC URL
+`jdbc:h2:mem:ecomdemo`, user `sa`, blank password.
+
 Do not stop a running `spring-boot:run` by deleting `target/` — `clean` pulls the classes out from
 under the running JVM. Stop the process first.
+
+## Architecture
+
+Three feature packages — `product`, `cart`, `order` — plus `common`. A request goes
+**Controller → Service → Repository** and never sideways or backwards.
+
+**Cross-feature calls go service → service, never into another feature's repository.** There are
+exactly two such seams, and both are deliberate:
+
+- `ProductService.requireEntity(id)` — the catalogue lookup that throws `NotFoundException` rather
+  than returning an `Optional`, so no caller handles the empty case.
+- `CartService.requireCart()` — returns the `Cart` **entity**, the one documented exception to
+  "entities never leave the service layer". `OrderService` needs the live managed entity so that
+  clearing the cart participates in the checkout transaction.
+
+A service test therefore mocks the collaborating *service* (`ProductService`, `CartService`), never
+that service's repository.
+
+**The cart is a single shared row.** There are no users until Phase 8, so `Cart.SHARED_CART_ID = 1L`
+is seeded by `data.sql` and every cart endpoint operates on it. `requireCart()` recreates it if the
+row is missing.
+
+**Cart totals are derived, order totals are stored.** `Cart.total()` recomputes from the live
+`Product` prices on every read — a cart must show today's price. `Order` stores `totalAmount`, and
+`OrderItem` snapshots `productName` and `unitPrice` at checkout, because an order is a historical
+record: repricing or deleting a product must not rewrite what a customer already paid. The order's
+`product` association is kept only for traceability and is never used to render a line.
+
+**Checkout validates the whole cart before mutating anything.** `OrderService.placeOrder()` loops
+twice — once to check stock for every line, once to reduce stock and build the order. With
+`@Transactional`, a five-line order whose fourth line is short changes nothing at all. Tests pin this
+by asserting the *first* line's stock is untouched after the failure.
+
+**Updates rely on Hibernate dirty checking, not `save()`.** Inside a `@Transactional` service method
+an entity loaded from a repository is managed, so mutating it is enough; `ProductService.update`,
+the stock decrement and `cart.clear()` all work this way. `verify(repo, never()).save(any())` is how
+tests keep that from silently regressing into an explicit save.
+
+**Time comes from an injected `Clock` bean** (`common/ClockConfiguration`), never `Instant.now()`, so
+a test can substitute `Clock.fixed(...)`.
+
+**Schema and data lifecycle.** Hibernate generates the schema from the `@Entity` classes
+(`ddl-auto: create-drop`) and `defer-datasource-initialization: true` makes `data.sql` run
+afterwards. The database is rebuilt and re-seeded on every start and nothing survives a restart —
+that is expected until Phase 4.
+
+**Spring Boot 4 splits auto-configuration into per-technology modules.** Putting a library on the
+classpath no longer configures it: the H2 console needs `spring-boot-h2console`, and the test slices
+need `spring-boot-webmvc-test` / `spring-boot-data-jpa-test`. When a technology seems not to
+auto-configure, look for its missing module before assuming a config error. Adding such a module is
+not "a new technology" for the one-technology-per-phase rule.
 
 ## Code conventions
 
@@ -62,11 +133,16 @@ values are normalised with `setScale(2, RoundingMode.HALF_UP)`. In tests compare
 **Errors go through `common/GlobalExceptionHandler`.** Every failure returns
 `{ "status": ..., "message": ... }`. Throw `NotFoundException` (→ 404) or `ConflictException` (→ 409)
 from a service; validation and binding failures become 400 automatically. No controller should
-contain a try/catch, and no service should mention HTTP.
+contain a try/catch, and no service should mention HTTP. 400 means "fix your request"; 409 means
+"your request is fine, but the server's state forbids it".
 
 **Explicit fetching.** `@ManyToOne` is always marked `FetchType.LAZY` (its default is EAGER). When a
 query needs an association, load it with `left join fetch` rather than relying on lazy loading —
 `spring.jpa.open-in-view` is `false`, so a lazy access outside the transaction fails loudly.
+
+**Entities keep both sides of an association in step** and own their own invariants —
+`Cart.addOrIncrease`, `Order.addItem` (which recalculates the total rather than accumulating it),
+`CartItem.detachFromCart`. Business rules that belong to one entity live on it, not in the service.
 
 **Comments explain *why*, not *what*.** The code says what it does; a comment earns its place by
 recording a trade-off or a non-obvious constraint.
@@ -75,8 +151,9 @@ recording a trade-off or a non-obvious constraint.
 
 **Naming:** `methodName_condition_expectedResult`. A failure report should read as a sentence.
 
-**Structure:** explicit `// GIVEN`, `// WHEN`, `// THEN` comments. **AssertJ** for every assertion,
-including controller tests. Compare money with `isEqualByComparingTo`, never `isEqualTo` —
+**Structure:** one `@Nested` class per method under test (service tests only — controller,
+repository and flow tests stay flat), then explicit `// GIVEN`, `// WHEN`, `// THEN` comments.
+**AssertJ** for every assertion, including controller tests. Compare money with `isEqualByComparingTo`, never `isEqualTo` —
 `BigDecimal.equals` compares scale too.
 
 **Pick the cheapest level that can catch the bug:**
@@ -91,12 +168,19 @@ including controller tests. Compare money with `isEqualByComparingTo`, never `is
 **Spring Boot 4 specifics.** `@WebMvcTest` and `@DataJpaTest` come from the separate
 `spring-boot-webmvc-test` and `spring-boot-data-jpa-test` modules. `@MockBean` is removed — use
 `@MockitoBean`. Controller tests use `MockMvcTester`, not classic `perform(...).andExpect(...)`.
+`TestRestTemplate` is no longer on the starter's classpath; the integration test uses
+`RestTestClient`.
 
 **Mock at the boundary you own.** A service test mocks the *collaborating service*, not that
 service's repository — otherwise a refactor in one feature breaks another feature's tests.
 
 **Prefer a stub to a mock for value-like collaborators.** `Clock.fixed(...)` over `mock(Clock.class)`:
 it is a real implementation with known behaviour and needs no stubbing.
+
+**Entities that need an id come from `support/TestFixtures`.** Ids are `@GeneratedValue` with no
+setter, so the fixture sets the field reflectively — keeping that compromise in one place. Repository
+tests deliberately do *not* use it: there, letting the database assign the id is part of what is
+under test.
 
 **Assert absence where absence is the behaviour.** `verify(repo, never()).save(any())` is how the
 reliance on Hibernate dirty checking is pinned down. In repository tests, `entityManager.clear()`
