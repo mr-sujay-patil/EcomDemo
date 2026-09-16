@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.ecomdemo</groupId>
+        <artifactId>ecomdemo</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>shared-kernel</artifactId>
+    <name>shared-kernel</name>
+    <description>What every EcomDemo service is: error shape, JWT validation, clock, common metric tags</description>
+
+    <!--
+        A library, not a service. Note what is NOT here: no spring-boot-maven-plugin. That plugin's
+        repackage goal rewrites the jar into an executable archive with the classes under
+        BOOT-INF/classes, which is unusable as a dependency - the services would compile against
+        nothing. The Spring Boot parent only declares the plugin in <pluginManagement>, so leaving it
+        out here is enough; the five services opt in and this module does not.
+
+        WHAT BELONGS IN HERE is the question this module exists to pose. The rule applied:
+        infrastructure yes, contracts no.
+
+        Shared *infrastructure* - the {status, message} error shape, how a JWT is validated, where
+        the clock comes from - is a library. If it changes, every service wants the change, and a
+        service that disagreed would be a bug.
+
+        Shared *contracts* - the JSON of a product, the shape of an OrderPlacedEvent - are
+        deliberately absent. Putting them here would look tidier and would quietly rebuild the
+        monolith: one record changes, five services must be recompiled and redeployed together, and
+        the independent deployability this whole phase is about is gone. Each service instead
+        declares the view it needs of its neighbours, which is why catalog's ProductResponse has
+        seven fields and order-service's CatalogProduct has three.
+    -->
+    <packaging>jar</packaging>
+
+    <dependencies>
+        <!--
+            Spring MVC and Jackson. Every EcomDemo service is an HTTP service, and the error handling
+            below is servlet-specific.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- Jakarta Bean Validation, so @Valid on a controller argument is actually enforced. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!--
+            Spring Security: the filter chain and method security.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+
+        <!--
+            OAuth2 Resource Server: validates the Bearer token on every request.
+
+            This is the dependency that makes "every service validates JWTs independently" true. It
+            carries NimbusJwtDecoder and, through spring-security-oauth2-jose, the JWK set client
+            that fetches customer-service's public key. Four of the five services need only the
+            verifying half; customer-service adds the issuing half on top.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+        </dependency>
+
+        <!--
+            Hibernate, Spring Data repositories, transaction management and HikariCP.
+
+            All five services own a database - that is the phase's central constraint - so JPA is
+            genuinely universal here rather than a convenience.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+
+        <!--
+            The PostgreSQL JDBC driver. Runtime scope: no application code imports a driver class -
+            Hibernate and HikariCP load it by name from the JDBC URL.
+        -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!--
+            Flyway, and Boot's auto-configuration module for it. Each service now owns its own
+            migration timeline against its own database, so each one needs this - see the
+            db/migration folder in every service.
+
+            Flyway 10 split the heavyweight database implementations out of flyway-core, so
+            PostgreSQL needs its own module. Without spring-boot-flyway the migrations sit on the
+            classpath and simply never run.
+        -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-flyway</artifactId>
+        </dependency>
+
+        <!--
+            Actuator and the Prometheus registry. Phase 15 gave the monolith a health endpoint and a
+            scrape endpoint; five services need five of each, and Prometheus now has five targets.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+    </dependencies>
+</project>

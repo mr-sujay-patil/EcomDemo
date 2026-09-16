@@ -22,6 +22,32 @@
     <name>ecomdemo</name>
     <description>Learning project: from Spring Boot monolith to distributed system</description>
 
+    <!--
+        Phase 20 turned this POM from "the application" into "the build".
+
+        It has <packaging>pom</packaging>, which means it produces no jar of its own. Its job is to
+        list the modules, be their parent, and hold the configuration they all share. `./mvnw clean
+        verify` here still builds and tests everything, in the order Maven works out from the
+        dependencies between modules - shared-kernel first, because the five services depend on it.
+
+        This is a *multi-module repository*, not a monorepo of unrelated projects: one version
+        number, one build, one CI run. That is a deliberate stop on the way to full independence. Each
+        service is independently *deployable* (its own image, its own database, its own process),
+        which is what this phase is about; making them independently *releasable* means separate
+        repositories and separate version numbers, which brings dependency management problems this
+        project does not need yet.
+    -->
+    <packaging>pom</packaging>
+
+    <modules>
+        <module>shared-kernel</module>
+        <module>services/customer-service</module>
+        <module>services/catalog-service</module>
+        <module>services/inventory-service</module>
+        <module>services/order-service</module>
+        <module>services/notification-service</module>
+    </modules>
+
     <properties>
         <java.version>21</java.version>
 
@@ -37,6 +63,9 @@
             Where the scanner looks for coverage. Sonar does not measure coverage itself: it reads a
             report somebody else produced, which is why running sonar:sonar without a preceding
             `verify` reports 0% rather than an error.
+
+            ${project.build.directory} resolves per module, so each service reports its own coverage
+            and the scanner aggregates them.
         -->
         <sonar.coverage.jacoco.xmlReportPaths>
             ${project.build.directory}/site/jacoco-merged/jacoco.xml
@@ -47,90 +76,37 @@
         <sonar.qualitygate.wait>true</sonar.qualitygate.wait>
     </properties>
 
+    <!--
+        Inherited by every module. Only things genuinely universal belong here - anything a single
+        service needs belongs in that service's POM, so that reading one POM tells you what that
+        service actually is.
+    -->
     <dependencies>
-        <!-- Spring MVC, embedded Tomcat and Jackson JSON binding. -->
+        <!-- JUnit 5, AssertJ, Mockito and @SpringBootTest. Every module has tests. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
-        </dependency>
-
-        <!-- Hibernate, Spring Data repositories, transaction management and HikariCP. -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-jpa</artifactId>
-        </dependency>
-
-        <!-- Jakarta Bean Validation, so @Valid on a controller argument is actually enforced. -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-validation</artifactId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
         </dependency>
 
         <!--
-            Redis, as a cache rather than a datastore. Brings Lettuce (the default client) and the
-            connection factory; the cache abstraction itself comes from the starter below.
+            @WithMockUser and the request post-processors. Every service validates JWTs from this
+            phase on, so every service has authorization rules to test.
         -->
         <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-redis</artifactId>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
         </dependency>
 
         <!--
-            Spring's cache abstraction - @Cacheable and friends - plus, via spring-boot-cache, the
-            auto-configuration that turns spring.cache.type=redis into a RedisCacheManager.
+            H2 in PostgreSQL mode, for the fast suite. Every service's *Test classes run on it so
+            `./mvnw test` needs nothing installed and no network; the *IT classes get a real
+            PostgreSQL container instead.
 
-            The abstraction is the point: the annotations name no vendor, so the same code runs on a
-            local ConcurrentHashMap in tests that do not want a container, and on Redis in production.
-        -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-cache</artifactId>
-        </dependency>
-
-        <!--
-            OAuth2 Resource Server: validates the Bearer token on every request.
-
-            It pulls in spring-security-oauth2-jose, which carries both NimbusJwtDecoder (verify a
-            token) and NimbusJwtEncoder (issue one) - so this single dependency covers both halves of
-            the phase. No separate JWT library (jjwt, java-jwt) is needed, and adding one would mean
-            two implementations of the same specification in one application.
-
-            "Resource server" is OAuth2's name for the thing that holds the data and accepts tokens,
-            as distinct from the authorization server that issues them. Here the application is both,
-            which is normal for a self-contained API and is exactly the part that Keycloak or Entra ID
-            would take over later.
-        -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
-        </dependency>
-
-        <!--
-            Spring Security: the filter chain, BCrypt, HTTP Basic and method security. Adding it to
-            the classpath secures every endpoint by default - which is the right default, and the
-            reason SecurityConfiguration has to say explicitly which endpoints are public.
-        -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-security</artifactId>
-        </dependency>
-
-        <!--
-            The PostgreSQL JDBC driver, and from this phase on the only database the application
-            itself talks to. Runtime scope: no application code imports a driver class - Hibernate
-            and HikariCP load it by name from the JDBC URL. The version comes from the parent POM.
-        -->
-        <dependency>
-            <groupId>org.postgresql</groupId>
-            <artifactId>postgresql</artifactId>
-            <scope>runtime</scope>
-        </dependency>
-
-        <!--
-            H2 is now TEST scope only. The running application uses PostgreSQL; the test suite keeps
-            an embedded database so `./mvnw clean verify` needs nothing installed and no network.
-            The cost is fidelity - H2 in PostgreSQL mode is not PostgreSQL - which is precisely the
-            gap Phase 7 closes with Testcontainers.
+            Test-scoped dependencies are NOT transitive, which is why these live here rather than in
+            shared-kernel: a service depending on shared-kernel inherits its compile dependencies and
+            none of its test ones. Declaring them on the parent is what gets them to all six modules.
         -->
         <dependency>
             <groupId>com.h2database</groupId>
@@ -139,108 +115,12 @@
         </dependency>
 
         <!--
-            Flyway owns the database schema from Phase 5 on: it creates it, versions it and records
-            every change in flyway_schema_history. Hibernate is demoted to validating that the
-            entities still match what Flyway built.
+            Testcontainers, and @ServiceConnection to wire the container's random port into the
+            context. Every service owns a database, so every service has integration tests that need
+            a real one.
 
-            Flyway 10 split the heavyweight database implementations out of flyway-core, so
-            PostgreSQL needs its own module - without it Flyway starts and then fails to recognise
-            the database. H2 is not in that split: flyway-core still carries it, which is why the
-            test suite needs no third dependency. Versions come from the parent POM (Flyway 12.4.0
-            under Spring Boot 4.1.1).
-        -->
-        <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-core</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-database-postgresql</artifactId>
-        </dependency>
-
-        <!--
-            Spring Boot's Flyway auto-configuration, which runs the migrations before Hibernate
-            builds the EntityManagerFactory and binds the spring.flyway.* properties.
-
-            It is a separate module for the same reason spring-boot-h2console was in Phase 0: Boot 4
-            split the auto-configurations out of spring-boot-autoconfigure per technology. Without
-            it Flyway sits on the classpath and simply never runs - no error, no log line, just an
-            empty database and a `Schema validation: missing table` failure from Hibernate that
-            points nowhere near the actual cause.
-        -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-flyway</artifactId>
-        </dependency>
-
-        <!--
-            Actuator: the operational endpoints (health, info, metrics) and the machinery that
-            exposes them over HTTP.
-
-            In Boot 4 this single starter is more than it looks. It pulls in
-            spring-boot-starter-micrometer-metrics - which carries Micrometer itself, the JVM and
-            HTTP meter binders, and the Prometheus *auto-configuration* - and spring-boot-health,
-            which carries the health groups this phase uses for liveness and readiness. The
-            per-technology split that needed a separate module for Flyway and for the test slices
-            does not bite here: one starter covers all three.
-        -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-actuator</artifactId>
-        </dependency>
-
-        <!--
-            The Prometheus meter registry - the thing that actually holds the meters in Prometheus's
-            data model and renders them in its text exposition format.
-
-            The starter above brings the auto-configuration for this registry but not the registry,
-            which is a distinction worth understanding: without this dependency the application
-            starts perfectly, /actuator/health works, and /actuator/prometheus is simply absent. No
-            error, no warning - the @ConditionalOnClass guarding PrometheusMetricsExportAutoConfiguration
-            just never matches. That is the same failure shape as spring-boot-flyway in Phase 5.
-
-            The version comes from micrometer-bom, which the Spring Boot parent already imports
-            (Micrometer 1.17.1 under Spring Boot 4.1.1).
-        -->
-        <dependency>
-            <groupId>io.micrometer</groupId>
-            <artifactId>micrometer-registry-prometheus</artifactId>
-        </dependency>
-
-        <!--
-            Spring for Apache Kafka: KafkaTemplate, @KafkaListener, and the @RetryableTopic
-            machinery that builds the retry and dead-letter topics.
-
-            The starter also carries spring-boot-kafka, the auto-configuration module. Boot 4's
-            per-technology split means that without it the Kafka classes would sit on the classpath
-            and no KafkaTemplate, no ConsumerFactory and no listener container would ever be
-            created - the same silent failure shape as spring-boot-flyway in Phase 5. The starter
-            pulls it in, so there is nothing extra to add here.
-
-            Versions come from the parent POM: spring-kafka 4.1.1 against kafka-clients 4.2.1.
-        -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-kafka</artifactId>
-        </dependency>
-
-        <!-- JUnit 5, AssertJ, @SpringBootTest and TestRestTemplate. -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-test</artifactId>
-            <scope>test</scope>
-        </dependency>
-
-        <!--
-            Testcontainers: a real PostgreSQL in a Docker container, started by the build and thrown
-            away after it. This is what finally lets the integration tests run on the same engine
-            production does, rather than on H2 pretending to be it.
-
-            Note the coordinates. Testcontainers 2.x renamed every module with a `testcontainers-`
-            prefix, so the `org.testcontainers:postgresql` that every tutorial and older answer uses
-            does not exist at 2.0.5 - its last release is 1.21.4, on the previous line. Pairing that
-            with a 2.x core would be a silent incompatibility. Versions come from the
-            testcontainers-bom the Spring Boot parent already imports.
+            Note the coordinates: Testcontainers 2.x renamed every module with a `testcontainers-`
+            prefix, so the `org.testcontainers:postgresql` every tutorial shows is the 1.x line.
         -->
         <dependency>
             <groupId>org.testcontainers</groupId>
@@ -252,43 +132,6 @@
             <artifactId>testcontainers-junit-jupiter</artifactId>
             <scope>test</scope>
         </dependency>
-
-        <!--
-            A real Kafka broker in a container for the integration tests.
-
-            Note the coordinates again. Testcontainers 2.x renamed every module with a
-            `testcontainers-` prefix, so `org.testcontainers:kafka` - which is what every tutorial
-            shows - is the 1.x line and would pair a 1.x module with a 2.x core. The version comes
-            from the testcontainers-bom the Spring Boot parent already imports.
-
-            The class this brings is org.testcontainers.kafka.KafkaContainer, which runs the
-            official apache/kafka image in KRaft mode. The older org.testcontainers.containers
-            .KafkaContainer in the same jar is the Confluent-plus-ZooKeeper one; this phase wants
-            the former.
-        -->
-        <dependency>
-            <groupId>org.testcontainers</groupId>
-            <artifactId>testcontainers-kafka</artifactId>
-            <scope>test</scope>
-        </dependency>
-
-        <!--
-            KafkaTestUtils and the consumer-building helpers, used by the integration test to read
-            the dead-letter topic directly rather than inferring that something landed there.
-        -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-kafka-test</artifactId>
-            <scope>test</scope>
-        </dependency>
-
-        <!--
-            @ServiceConnection, which points the application's DataSource at whatever host and port
-            the container happened to get - no @DynamicPropertySource wiring by hand.
-
-            Its own module, for the same reason spring-boot-h2console and spring-boot-flyway were:
-            Boot 4 splits auto-configuration per technology.
-        -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-testcontainers</artifactId>
@@ -296,20 +139,9 @@
         </dependency>
 
         <!--
-            @WithMockUser and the httpBasic() request post-processor. Without this, testing an
-            authorization rule would mean authenticating for real in every test.
-        -->
-        <dependency>
-            <groupId>org.springframework.security</groupId>
-            <artifactId>spring-security-test</artifactId>
-            <scope>test</scope>
-        </dependency>
-
-        <!--
             Test slices. Spring Boot 4 split the test auto-configurations out of
-            spring-boot-test-autoconfigure into per-technology modules, the same way it did for the
-            H2 console in Phase 0, so @WebMvcTest and @DataJpaTest each need their own module.
-            Versions come from the parent POM.
+            spring-boot-test-autoconfigure into per-technology modules, so @WebMvcTest and
+            @DataJpaTest each need their own.
         -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -325,47 +157,18 @@
 
     <build>
         <plugins>
-            <plugin>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-maven-plugin</artifactId>
-                <executions>
-                    <!--
-                        Writes target/classes/META-INF/build-info.properties at package time, which
-                        is what /actuator/info reports. Without it the info endpoint is exposed and
-                        returns {} - technically working, and useless.
-
-                        This is build metadata, not a new technology: the plugin was already here.
-                    -->
-                    <execution>
-                        <id>build-info</id>
-                        <goals>
-                            <goal>build-info</goal>
-                        </goals>
-                    </execution>
-                </executions>
-            </plugin>
-
-            <!--
-                Failsafe runs the integration tests (*IT.java); Surefire keeps the unit and slice
-                tests (*Test.java). Their default include patterns already draw that line, so the
-                only thing needed here is to bind Failsafe's goals - it has none by default.
-
-                Why two plugins rather than one. Surefire fails the build the moment a test fails,
-                which for an integration test would abandon the run before post-integration-test and
-                leave containers behind. Failsafe deliberately separates running from reporting: the
-                integration-test goal records failures, the verify goal is what fails the build, and
-                everything in between still executes. That is also why `./mvnw test` needs no Docker
-                at all - it never reaches the phases Failsafe binds to.
-            -->
             <!--
                 JaCoCo measures which lines the tests actually execute, by attaching an agent that
                 instruments classes as they are loaded.
 
                 Two agents, because Phase 7 split the suite: one for Surefire's unit and slice tests
                 and one for Failsafe's integration tests. They write separate .exec files, which are
-                merged into a single report - the 28 integration tests drive real HTTP through the
-                whole stack, and a report that ignored them would understate what the suite covers
-                badly enough to encourage writing redundant unit tests to make a number go up.
+                merged into a single report - the integration tests drive real HTTP through the whole
+                stack, and a report that ignored them would understate what the suite covers badly
+                enough to encourage writing redundant unit tests to make a number go up.
+
+                Declared here rather than in each module: every module gets the same treatment, and
+                the merged report lands in that module's own target/.
             -->
             <plugin>
                 <groupId>org.jacoco</groupId>
@@ -437,6 +240,18 @@
                 <version>${sonar-maven-plugin.version}</version>
             </plugin>
 
+            <!--
+                Failsafe runs the integration tests (*IT.java); Surefire keeps the unit and slice
+                tests (*Test.java). Their default include patterns already draw that line, so the
+                only thing needed here is to bind Failsafe's goals - it has none by default.
+
+                Why two plugins rather than one. Surefire fails the build the moment a test fails,
+                which for an integration test would abandon the run before post-integration-test and
+                leave containers behind. Failsafe deliberately separates running from reporting: the
+                integration-test goal records failures, the verify goal is what fails the build, and
+                everything in between still executes. That is also why `./mvnw test` needs no Docker
+                at all - it never reaches the phases Failsafe binds to.
+            -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>

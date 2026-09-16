@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.ecomdemo</groupId>
+        <artifactId>ecomdemo</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>catalog-service</artifactId>
+    <name>catalog-service</name>
+    <description>The product catalogue, cached in Redis</description>
+
+    <dependencies>
+        <!--
+            Web, JPA, security, JWT validation, Flyway, actuator and the shared error shape. One
+            dependency instead of eleven repeated in five POMs - and, more usefully, one place to
+            read what "an EcomDemo service" means.
+        -->
+        <dependency>
+            <groupId>com.ecomdemo</groupId>
+            <artifactId>shared-kernel</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <!--
+            Redis and Spring's cache abstraction. Only this service caches: the catalogue is the
+            one thing read far more often than it is written, and Phase 13's rule still holds -
+            cache what is read to be displayed, never what is read to make a decision. Stock is the
+            latter, and it now lives in another service entirely.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-cache</artifactId>
+        </dependency>
+
+        <!--
+            Spring for Apache Kafka. Asynchronous communication between services was already in
+            place from Phase 17; the split is what turns it from "a listener in another package" into
+            "a listener in another process", which is the only kind of decoupling that survives one
+            of the two being down.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-kafka</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-kafka</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-kafka-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+                Repackages the jar into an executable archive, and writes
+                target/classes/META-INF/build-info.properties so /actuator/info reports something.
+
+                Declared per service rather than on the parent on purpose: shared-kernel must NOT be
+                repackaged, because a Boot executable jar puts its classes under BOOT-INF/classes
+                where nothing can compile against them.
+            -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>build-info</id>
+                        <goals>
+                            <goal>build-info</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
