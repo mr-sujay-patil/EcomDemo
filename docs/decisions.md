@@ -353,15 +353,22 @@ deadlock instantly. With the default `REQUIRED` the audit would simply join the 
 with it, producing a trail that is complete only for the cases that already worked — worse than no
 audit, because it looks trustworthy.
 
-**H2 and PostgreSQL race differently, and it changes what the test proves.** `ConcurrentOrderTest`
-asserts the invariant (one order, zero stock, never oversold) rather than which error the loser got,
-because that depends on the interleaving. Measured: on H2 the two transactions serialise and the
-version conflict fired **zero times in 40 races** — the loser was always turned away by an already
-empty cart. Against real PostgreSQL over HTTP it fired in **5 of 5 races**, and the audit trail shows
-the full path each time: `PLACED`, then `CONCURRENT_MODIFICATION`, then `EMPTY_CART` on the retry,
-returning 409. So the end-to-end test is necessary but not sufficient on H2, and `OptimisticLockTest`
-exists beside it to pin the lock down deterministically by creating the stale write in a fixed order.
-Phase 7 (Testcontainers) is what would let the concurrency test itself run on PostgreSQL.
+**The concurrency test asserts the invariant, not how the loser lost.** `ConcurrentOrderTest` checks
+one order, zero stock, never oversold — never which exception the losing thread received, because
+that depends on the interleaving and pinning it down would make it a test of the scheduler.
+`OptimisticLockTest` sits beside it and creates the stale write in a fixed order, so there is one
+place where the failure can only be the version check.
+
+> **Corrected in Phase 7.** This entry originally recorded that the version conflict fired **zero
+> times in 40 races on H2** and 5 of 5 against PostgreSQL, and concluded the engines race
+> differently. That was wrong: it was a flaw in how conflicts were counted, not a property of H2.
+> The count came from the exception the calling thread finally saw — but `@Retryable` retries the
+> rejected thread, the retry finds the cart already consumed, and a `ConflictException` is what
+> surfaces, hiding the lock entirely from outside. Counted from the `CONCURRENT_MODIFICATION` audit
+> rows instead, **the lock fires on both engines, five times in five rounds on each.** The audit
+> trail was the reliable evidence all along, which is a small argument for the audit table itself.
+> The case for running this against PostgreSQL in Phase 7 still stands — it is what production runs —
+> but not on the grounds originally given.
 
 **Optimistic, not pessimistic.** Optimistic locking takes no locks and blocks nothing; it detects the
 collision at write time and makes the loser redo the work. That suits a catalogue — read constantly,
@@ -392,3 +399,68 @@ removes execution order from the set of things that can break the build.
 - `order_audit` grows without bound. Retention is an operational concern with nowhere to live yet.
 - The audit records what the application attempted, not who attempted it. There are no users
   until Phase 8.
+
+---
+
+## Phase 7 — Integration Testing with Real Infrastructure
+
+**Testcontainers 2.0.5, and the coordinates are not the ones you remember.** The Spring Boot parent
+imports `testcontainers-bom:2.0.5`, and 2.x renamed every module with a `testcontainers-` prefix:
+`org.testcontainers:testcontainers-postgresql`, not `org.testcontainers:postgresql`. The old
+coordinate is not deprecated, it simply has no 2.x release — its last is 1.21.4 — so following any
+existing tutorial would pair a 1.x module with a 2.x core. The class moved too, from
+`org.testcontainers.containers.PostgreSQLContainer` to `org.testcontainers.postgresql.PostgreSQLContainer`
+(the old package survives as a shim). Checked against the BOM and the jar rather than assumed, which
+is the only reason it was caught before it became a confusing runtime failure.
+
+**A singleton container, not `@Container`.** `AbstractPostgresIT` holds the container in a `static`
+field started from a `static` initialiser, so it is created once per JVM and shared by every
+integration test. `@Testcontainers` with `@Container` is the better-known form and does the opposite:
+JUnit starts a container before each test class and stops it after, which for four IT classes means
+four start/stop cycles for no benefit. Nothing stops the container explicitly either — Testcontainers'
+Ryuk sidecar removes it when the JVM exits, including when the JVM is killed, which a shutdown hook
+cannot promise.
+
+**The ITs run under `dev`, not a test profile.** They deliberately use the configuration the
+application actually runs with — `ddl-auto: validate`, Flyway enabled, the real Hikari settings — and
+`@ServiceConnection` swaps only the connection details. The consequence is the valuable part: **the
+Flyway migrations are executed against real PostgreSQL on every build**, closing a gap open since
+Phase 5, and `validate` proves the entity mappings match what those migrations produce on the real
+engine rather than on H2.
+
+**H2 stays for the fast tests.** Moving `@DataJpaTest` onto Testcontainers too was considered and
+rejected: the inner loop would then need Docker and would slow down, and a slice test's whole point is
+being cheap. The division is now explicit — Surefire runs `*Test.java` with no Docker requirement,
+Failsafe runs `*IT.java` against PostgreSQL. The residual risk is a PostgreSQL-specific problem in a
+hand-written query that only the ITs would catch, which is a known and accepted trade rather than an
+oversight.
+
+**Surefire and Failsafe are not interchangeable.** Surefire fails the build the moment a test fails.
+For an integration test that would abandon the run before `post-integration-test`, leaving containers
+behind. Failsafe separates the two: `integration-test` records failures and `verify` is what fails the
+build, so teardown always happens. It also keeps `./mvnw test` genuinely Docker-free, verified by
+running it with `DOCKER_HOST` pointed at a socket that does not exist — 94 tests, green, 7 seconds.
+
+**Container reuse between builds was rejected.** `withReuse(true)` would save the ~1s startup by
+leaving the container running for the next build, but it cannot be enabled from the repository (each
+developer must opt in via `~/.testcontainers.properties`), and state surviving between runs makes a
+test that assumes an empty table pass alone and fail in sequence. One container per run, torn down at
+the end, is worth the second.
+
+**A Phase 6 measurement was wrong, and is corrected in place.** Phase 6 reported that the optimistic
+lock never fired on H2 (0 in 40 races) and fired every time on PostgreSQL, and concluded the engines
+race differently. Moving the test here exposed the flaw: conflicts were counted from the exception the
+calling thread finally saw, but `@Retryable` retries the rejected thread and the retry finds the cart
+already consumed, so a `ConflictException` surfaces and the lock is invisible from outside. Counted
+from the `CONCURRENT_MODIFICATION` audit rows instead, the lock fires on **both** engines — five in
+five rounds on each. The Phase 6 entries in this file and in the README now carry that correction
+rather than being silently edited. Two lessons worth keeping: a measurement taken from the wrong
+vantage point is worse than no measurement, because it gets written down as a finding; and the audit
+table introduced in Phase 6 was the reliable evidence all along.
+
+### Known gaps, deferred on purpose
+
+- Slice tests still run on H2.
+- Nothing runs the ITs automatically — CI is Phase 11, and it will need a Docker-capable runner.
+- The ITs share one container and commit, so they cannot assert on row counts.
+- No container reuse between builds.
