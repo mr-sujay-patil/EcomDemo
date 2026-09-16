@@ -111,6 +111,41 @@
         </dependency>
 
         <!--
+            Testcontainers: a real PostgreSQL in a Docker container, started by the build and thrown
+            away after it. This is what finally lets the integration tests run on the same engine
+            production does, rather than on H2 pretending to be it.
+
+            Note the coordinates. Testcontainers 2.x renamed every module with a `testcontainers-`
+            prefix, so the `org.testcontainers:postgresql` that every tutorial and older answer uses
+            does not exist at 2.0.5 - its last release is 1.21.4, on the previous line. Pairing that
+            with a 2.x core would be a silent incompatibility. Versions come from the
+            testcontainers-bom the Spring Boot parent already imports.
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+            @ServiceConnection, which points the application's DataSource at whatever host and port
+            the container happened to get - no @DynamicPropertySource wiring by hand.
+
+            Its own module, for the same reason spring-boot-h2console and spring-boot-flyway were:
+            Boot 4 splits auto-configuration per technology.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
             Test slices. Spring Boot 4 split the test auto-configurations out of
             spring-boot-test-autoconfigure into per-technology modules, the same way it did for the
             H2 console in Phase 0, so @WebMvcTest and @DataJpaTest each need their own module.
@@ -133,6 +168,31 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+
+            <!--
+                Failsafe runs the integration tests (*IT.java); Surefire keeps the unit and slice
+                tests (*Test.java). Their default include patterns already draw that line, so the
+                only thing needed here is to bind Failsafe's goals - it has none by default.
+
+                Why two plugins rather than one. Surefire fails the build the moment a test fails,
+                which for an integration test would abandon the run before post-integration-test and
+                leave containers behind. Failsafe deliberately separates running from reporting: the
+                integration-test goal records failures, the verify goal is what fails the build, and
+                everything in between still executes. That is also why `./mvnw test` needs no Docker
+                at all - it never reaches the phases Failsafe binds to.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
