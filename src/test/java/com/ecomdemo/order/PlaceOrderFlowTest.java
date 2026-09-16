@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.client.RestTestClient;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -22,14 +23,19 @@ import static org.assertj.core.api.Assertions.assertThat;
  * The one integration test of this phase.
  *
  * <p>{@code @SpringBootTest(webEnvironment = RANDOM_PORT)} starts the whole application - the Spring
- * context, Hibernate, the seeded H2 database and a real Tomcat on a free port - so this exercises
+ * context, Hibernate, the seeded test database and a real Tomcat on a free port - so this exercises
  * the same code path as the curl flow in the README, HTTP layer included. A random port is used so
  * the test cannot collide with a locally running instance on 8080.
  *
  * <p>{@link RestTestClient} is Spring Framework 7's synchronous test client, bound here to the live
  * server rather than to MockMvc. It ships with spring-test, so no extra dependency is needed.
+ *
+ * <p>{@code @ActiveProfiles("test")} is what keeps this test hermetic. Without it the default
+ * {@code dev} profile applies and the context tries to open a PostgreSQL connection, so the build
+ * would fail on any machine with no database running.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@ActiveProfiles("test")
 class PlaceOrderFlowTest {
 
     private static final ParameterizedTypeReference<List<ProductResponse>> PRODUCT_LIST =
