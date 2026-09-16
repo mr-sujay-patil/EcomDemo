@@ -56,9 +56,16 @@ public class OrderMetrics {
     OrderMetrics(MeterRegistry registry) {
         this.registry = registry;
 
+        /*
+         * No .baseUnit("orders").
+         *
+         * Micrometer's Prometheus naming convention appends the base unit to the metric name, so
+         * that call would publish orders_placed_orders_total rather than orders_placed_total - the
+         * unit is meant for things like bytes and seconds, where it disambiguates. A count of
+         * orders is already named for what it counts.
+         */
         this.ordersPlaced = Counter.builder(ORDERS_PLACED)
                 .description("Orders successfully placed")
-                .baseUnit("orders")
                 .register(registry);
 
         /*
