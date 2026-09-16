@@ -170,3 +170,74 @@ assert that Spring Data works, which is not ours to verify.
   adding when the suite is slow enough to notice — at 6 seconds it is not.
 - `TestFixtures` sets `Product.id` by reflection because the field is `@GeneratedValue` with no
   setter. Confined to one file, but still a compromise the production design forces.
+
+---
+
+## Phase 4 — PostgreSQL
+
+**PostgreSQL 18 in Docker, driver 42.7.13 from the Spring Boot parent.** No version is pinned in
+`pom.xml`: the parent curates a driver known to work with Boot 4.1.1. The README's `docker run` pins
+`postgres:18-alpine` so everyone gets the same engine, and notes the trap that PostgreSQL 18 moved
+the image's volume from `/var/lib/postgresql/data` to `/var/lib/postgresql` — the old path still
+mounts, it just stops persisting anything, which is the worst kind of failure.
+
+**H2 stays, at `test` scope.** The application runs on PostgreSQL; the test suite does not. The
+alternative — pointing the tests at a real PostgreSQL — buys fidelity at the price of a build that
+fails on any machine without a running database, including the CI runner arriving in Phase 11, and
+of test data landing in the developer's own database. Keeping the build hermetic is worth more right
+now, and the resulting blind spot is exactly what Phase 7 (Testcontainers) exists to remove. Until
+then a green build is evidence about our logic, not about PostgreSQL compatibility. The test URL sets
+`MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE` so H2 at least parses PostgreSQL syntax and folds unquoted
+identifiers the same way; that narrows the gap without closing it.
+
+**`spring-boot-h2console` removed rather than kept for tests.** It configures a web console for a
+database the application no longer runs on. Reading the schema is now a job for `psql`, DBeaver or
+pgAdmin — which is one of this phase's stated concepts, not a loss.
+
+**Profiles hold only what differs.** `application.yml` keeps the settings every profile shares
+(`open-in-view`, SQL logging, error handling); `application-dev.yml` and `application-test.yml` hold
+the datasource and the schema strategy. `dev` is the default so `./mvnw spring-boot:run` works with
+no flag, and tests opt out explicitly with `@ActiveProfiles("test")`. Without that annotation
+`@SpringBootTest` inherits `dev` and tries to dial PostgreSQL, so the build breaks wherever no
+database is running — a one-line omission with a confusing failure, which is why there is now a test
+asserting each profile's datasource.
+
+**Credentials come from `POSTGRES_URL`, `POSTGRES_USER`, `POSTGRES_PASSWORD`.** The defaults after
+each `:` in the dev profile are committed deliberately. They are not secrets: they open a throwaway
+local container and nothing else, and having them in the file is what lets a fresh clone start with
+one command. A real deployment overrides all three from the environment, which
+`DatasourceProfileTest` pins down by asserting the environment wins.
+
+**HikariCP is configured explicitly even though its defaults would do.** Pool size 10, two idle
+connections kept warm, a 30 s wait for a free connection and a 30 min maximum connection lifetime.
+The values are close to the library's own defaults; writing them down makes them reviewable, and
+`max-lifetime` in particular is the setting that matters once a real network sits between the
+application and the database — it must stay below whatever idle timeout the database or a proxy
+enforces, or the pool cheerfully hands out sockets the far end has already closed.
+
+**`spring.sql.init.mode: never` in dev — the seeding trap this phase creates.** Phase 0 ran
+`data.sql` on every start, which is free when the database is thrown away at shutdown and actively
+wrong when it is not: ten more products on every boot. The catalogue is now seeded once by hand
+(the README gives the command) and the file is left in place for the test profile, which still wants
+a fresh catalogue per run. The shared cart needs no seeding at all — `CartService.requireCart()`
+already recreates row 1 when it is missing.
+
+**`hibernate.jdbc.time_zone: UTC`.** Checked against the generated schema rather than assumed:
+Hibernate maps `Order.placedAt` (an `Instant`) to `TIMESTAMP_UTC`, which PostgreSQL realises as
+`timestamp with time zone` — so on PostgreSQL alone the setting would be redundant. It earns its
+place because the test profile runs on H2, where that mapping is not guaranteed to match; pinning
+the zone removes both the machine's timezone and the engine from the set of things that can change a
+stored timestamp.
+
+**`ddl-auto: update`, knowingly on borrowed time.** It is what the roadmap asks for in this phase and
+it is fine for a single developer adding fields. It also cannot rename a column, cannot drop one, and
+never reports what it changed — rename a field and you silently get a second column beside the first,
+with the old data stranded in it. Phase 5 replaces it with Flyway.
+
+### Known gaps, deferred on purpose
+
+- Tests do not touch PostgreSQL (Phase 7, Testcontainers).
+- Schema changes are unversioned and unreviewable (Phase 5, Flyway).
+- The `docker run` command is a copy-paste convenience, not an understanding of Docker (Phase 10).
+- Nothing checks the database is reachable before the application accepts traffic; a health endpoint
+  arrives with Actuator in Phase 15.

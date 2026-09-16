@@ -17,9 +17,14 @@ spring:
       hibernate:
         format_sql: true
         jdbc:
-          # Write timestamps in UTC rather than the JVM's default zone. Order.placedAt is an Instant,
-          # which Hibernate maps to `timestamp(6)` - a column with no zone attached. Without this the
-          # stored value silently depends on the timezone of whichever machine wrote it.
+          # Bind and read timestamps as UTC rather than in the JVM's default zone, so the same code
+          # behaves identically on a laptop in IST and a server in UTC.
+          #
+          # PostgreSQL alone would not need this: Hibernate maps Order.placedAt (an Instant) to
+          # TIMESTAMP_UTC, which it realises as `timestamp with time zone`, and that column stores an
+          # unambiguous point in time. The setting earns its place because the test profile runs on
+          # H2, where the mapping is not guaranteed to match - pinning the zone removes the machine
+          # and the engine as variables at once.
           time_zone: UTC
 
 server:
