@@ -1123,3 +1123,203 @@ reading the `MeterRegistry` bean.
 - Grafana has one dashboard and no alert rules of its own; Prometheus owns the alerting here.
 - The business meters cover checkout only. Cart abandonment, catalogue browsing and login failures
   are all measurable and none of them are measured.
+
+---
+
+## Phase 17 — Messaging
+
+**Kafka is a log, not a queue, and that is the whole reason for this phase.** A queue hands a message
+to one consumer and forgets it. Kafka appends to a partitioned, durable, replayable log and lets each
+consumer group track its own position in it — so adding a second subscriber later needs no
+cooperation from the producer, and a consumer that was down reads what it missed rather than losing
+it. Everything below follows from that.
+
+### The broker
+
+**KRaft, so there is no ZooKeeper service at all.** Kafka used to need a second distributed system to
+hold cluster metadata — which broker exists, who leads which partition. Since 4.0 that metadata lives
+in Kafka's own Raft-managed log. One system to run, upgrade and reason about. The single container
+plays both roles (`KAFKA_PROCESS_ROLES: broker,controller`), which is supported and is what a
+single-node stack wants; splitting the roles across nodes is the production shape.
+
+**Three settings must be forced to 1, and the default failure is a hang rather than an error.**
+`KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR`, `KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR` and
+`..._MIN_ISR` all default to 3, because Kafka's defaults assume a real cluster. On one broker a topic
+that needs three replicas can never become available — and `__consumer_offsets` is created lazily on
+the first commit, so the broker starts perfectly, the application connects perfectly, and the first
+consumer group simply never finishes joining. `KafkaConfigurationTest` asserts all three.
+
+**`KAFKA_ADVERTISED_LISTENERS` says `kafka`, not `localhost`, and it is not cosmetic.** A client's
+first connection only asks which broker leads which partition; every connection after that goes to
+the address that answer contains. Advertising `localhost` would send the `app` container to itself.
+This is the same container-networking rule as `POSTGRES_URL`, but with a second hop that makes it
+easy to get wrong — which is also why publishing 9092 to the host would not work without a second
+listener, and why the broker is simply not published.
+
+**Kafka gets a volume where Redis does not.** Redis holds only what can be rebuilt from PostgreSQL.
+Kafka holds events that nothing else has, plus every consumer group's position: dropping it loses
+unconsumed messages and rewinds every consumer to the beginning.
+
+**Kafka UI is kafbat's fork, not provectus's.** `provectuslabs/kafka-ui` was archived in 2023 and its
+last tag predates KRaft-only Kafka. Published on 8081 because the application owns 8080.
+
+### Producing
+
+**The message key is the order id, and that is the entire ordering guarantee.** Kafka promises
+ordering *within a partition* and offers nothing across partitions. The producer chooses a partition
+by hashing the key, so keying by order id puts every event about one order in one partition — ordered
+relative to each other — while different orders spread across all three and are processed in
+parallel. A null key round-robins, which is fine with one event type and silently wrong the moment
+`orders.cancelled` joins the topic.
+
+**Three partitions, declared rather than auto-created.** A broker will create a topic on first use
+with *one* partition, and partition count cannot be lowered afterwards — raising it later breaks the
+ordering guarantee for every key already in the topic. Partitions are also the cap on consumer
+parallelism: three means up to three instances can share the work, a fourth idles.
+
+**`acks=all` plus `enable.idempotence`.** `acks=1` is the setting that quietly loses data: the leader
+acknowledges, then dies before a follower has copied the record, and a follower that never saw it is
+elected. Idempotence then stops retries from duplicating — the broker discards a record whose
+producer id and sequence number it has already seen. That is exactly-once *for the write*, and worth
+being precise about: it removes duplicates caused by producer retries and nothing else, which is why
+the consumer is idempotent as well.
+
+**`max.block.ms` is lowered from 60s to 5s.** `send()` blocks on the calling thread while it fetches
+metadata for a topic it has not written to. The default would freeze every checkout for a full minute
+when the broker is unreachable.
+
+**The event is published after the transaction commits, and a failure does not fail the checkout.**
+Publishing from inside `OrderPlacement` would announce orders that a rollback later erased, and Kafka
+has no rollback — the retraction would have to be a second event every consumer had to understand. So
+it goes in `OrderService`, after `placeOnce()` returns, for the same reason the meters do. By then the
+customer has bought something; throwing would turn a completed purchase into a 500 with the order
+still in the database.
+
+**Which leaves a real dual-write hole, deliberately visible.** The order can be committed and the
+event lost — broker down, process killed between the commit and the send — with nothing to reconcile
+the two. No amount of retrying inside the method closes it, because the process can die before the
+retry. The fix is to write the event to the same database in the same transaction and move it to
+Kafka afterwards: the transactional outbox, which is Phase 18. This phase leaves the gap documented
+on `OrderEventPublisher` rather than papered over, because the gap is the motivation for the next
+phase.
+
+**The event is its own record, not `OrderResponse`.** They look nearly identical and reusing the DTO
+would save forty lines. They answer to different people: `OrderResponse` is shaped by an HTTP client
+deployed alongside it, the event by subscribers that are not. A field renamed in the DTO breaks a
+consumer running last month's code, weeks later, with no compiler anywhere to notice. Events evolve
+by adding fields only — the same expand-then-contract discipline the migrations follow, for the same
+reason.
+
+### Consuming
+
+**`ErrorHandlingDeserializer` is the single most important line in the consumer config.** Without it
+a malformed message is not a failed *record* but a failed *poll*: the container asks for the same
+batch, fails again, and the partition stops advancing forever. No retry, no dead letter, no error —
+just a consumer that looks healthy and has silently stopped. With it, the failure becomes a record
+the error handler can route.
+
+**`enable-auto-commit: false`.** Auto-commit acknowledges records that were *received*, not records
+that were *handled*; a crash in between loses the message silently. Letting the container commit
+after the listener returns is what makes the delivery at-least-once rather than at-most-once.
+
+**`@RetryableTopic` moves a failed record off the partition instead of retrying in place.** A
+partition is an ordered log read by one consumer, so sleeping and retrying blocks every record behind
+it — one stuck order would hold up every other customer's confirmation. Forwarding to
+`orders.placed-retry-0` and then `-retry-1` keeps the main partition moving. The price is that a
+retried record is no longer ordered relative to the others, which is acceptable for a notification and
+would not be for something applying state transitions in sequence.
+
+**A poison message skips the retries entirely.** Retrying helps a failure that might not recur — a
+deadlock, a timeout, a service briefly down. A payload that cannot be deserialized will fail
+identically forever, so `DeserializationException` is on Spring's non-retryable list and goes to the
+DLT on the first attempt.
+
+**The dead-letter topic is a queue for humans.** Nothing drains it. Its job is that a record which
+cannot be processed is *kept, visibly*, rather than dropped or left blocking the topic.
+
+### Idempotency
+
+**`processed_events.event_id` is the primary key, and that is the mechanism.** The `existsById` check
+in front of it is an optimisation — it answers the common case cheaply and keeps a re-delivery from
+producing a stack trace — but it cannot be the guard, because between the read and the write there is
+a window two deliveries can both pass through. The unique constraint has no window, so the
+`DataIntegrityViolationException` catch is the part that must not be removed.
+
+**The claim and the work share one transaction, and the claim goes first.** Two commits would let the
+process die between them and mark an event handled that was not, which is worse than a duplicate.
+
+**What this does and does not promise.** Exactly-once *processing* across a broker and a database is
+not on offer — the work and the offset commit are two systems again. Exactly-once *effect* is, and
+that is what a customer experiences: one confirmation, however many times Kafka delivers the record.
+
+**`eventId` is generated once, at publication.** A re-delivery of one record carries the same id and
+is absorbed; publishing the same order twice is two distinct events and the consumer is right to act
+on both. Sharing an id across publications would make the second order silently vanish.
+
+**`notifications` has no foreign keys.** A consumer acts on what the event told it, not on what it can
+look up: it must be able to record a notification for an order since deleted, and must not fail
+because a row it never asked about is missing. Today the producer shares the database and a foreign
+key would work; the moment notifications move out it would not, and a schema that has to be unpicked
+later is worse than one that was honest from the start.
+
+### Three things only running it revealed
+
+**`JsonSerializer` is the Jackson 2 one and cannot serialize an `Instant`.** Spring Kafka 4.1 ships
+both `JsonSerializer` (Jackson 2, `com.fasterxml.jackson`) and `JacksonJsonSerializer` (Jackson 3,
+`tools.jackson`, which Spring Boot 4 standardised on). The first checkout failed with "Java 8
+date/time type `java.time.Instant` not supported by default" — Jackson 2 needs the JSR-310 module
+registered, Jackson 3 does not. Every example written before Boot 4 names the class that no longer
+works here, the same trap as `tools.jackson` vs `com.fasterxml.jackson` elsewhere in the tests.
+
+**A DLT full of base64 is a DLT nobody can read.** `@RetryableTopic` republishes a failed record
+through the application's `KafkaTemplate`. For a handler failure that is fine. For a *deserialization*
+failure the payload is still the original `byte[]`, and asking a JSON serializer to write a byte array
+produces a JSON string containing base64 — `"e25vdCBldmVuIHZhbGlkIGpzb24="` instead of the malformed
+payload someone needs to see. Nothing looks broken; you only find out by opening the topic. A
+`DelegatingByTypeSerializer` passes raw bytes through and sends everything else to Jackson.
+
+**Fixing that took three attempts, because Spring Boot's back-off rules bite in different ways.**
+Declaring an extra `KafkaTemplate` bean does not add one alongside Boot's — Boot's is
+`@ConditionalOnMissingBean(KafkaTemplate.class)`, so *any* template bean makes it back off, the
+auto-configured one silently disappears, and everything starts using the replacement. Declaring a
+`ProducerFactory<String, Object>` instead fails differently: Boot's `kafkaTemplate` asks for a
+`ProducerFactory<Object, Object>`, which that does not satisfy, and the context will not start.
+`DefaultKafkaProducerFactoryCustomizer` is the hook meant for this — the auto-configuration builds its
+factory and hands it over to be adjusted. And `DelegatingByTypeSerializer` matches by *exact class*
+unless constructed with `isAssignable = true`, so an `Object.class` entry is a catch-all that catches
+nothing; the symptom is "Send failed" with no further detail.
+
+### A cache race that Kafka exposed
+
+`ProductCacheIT` began failing roughly two runs in five, in three tests, with nothing in the caching
+code changed. The failures were real: a `DEL` logged three milliseconds before a `GET` that hit, and a
+read immediately after a `@CachePut` served the value being replaced.
+
+In Spring Data Redis 4 a cache write is *dispatched* rather than completed — `RedisCacheWriter.store`
+returns a `CompletableFuture` — so a `put` still in flight can reach Redis after a `del` issued later,
+and a read straight after a write-through can still be served the old entry. The window is
+sub-millisecond, which is why it took the Kafka listener containers' extra polling threads to shift
+the scheduling enough to expose it.
+
+It was bisected rather than guessed: `main` green 5/5, `main` plus the Kafka dependency 4/4, this
+branch ~3/5 — and still red with the new IT excluded and event publishing disabled, which ruled out
+the new code and left the timing. The tests now wait up to two seconds. That is the honest assertion
+rather than a weakened one: what they exist to prove is that a write path *evicts* rather than leaving
+the entry to expire, and the TTLs are minutes.
+
+### Known gaps, deferred on purpose
+
+- **The dual write is still there.** Phase 18's outbox is the fix, and this phase exists partly to
+  make the problem concrete first.
+- No schema registry. The event contract is a Java record and a trusted-packages allow-list; Avro or
+  JSON Schema with a registry is what enforces compatibility across teams.
+- No transactional producer (`transactional.id`), so no exactly-once semantics between consuming and
+  producing.
+- One broker, replication factor 1. Nothing here survives losing it.
+- The DLT has no replay tooling — inspection is Kafka UI and a console consumer.
+- `processed_events` grows forever. Expiring rows older than the longest re-delivery window needs a
+  scheduler this phase does not introduce.
+- No consumer-lag alerting in the Phase 15 Grafana dashboard, which is the first thing a real
+  deployment would add.
+- PLAINTEXT with no authentication, on the compose network only. TLS and SASL are what a real broker
+  needs.
