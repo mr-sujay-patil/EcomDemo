@@ -5,7 +5,6 @@ import java.math.BigDecimal;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
-import jakarta.validation.constraints.PositiveOrZero;
 import jakarta.validation.constraints.Size;
 
 /**
@@ -14,6 +13,13 @@ import jakarta.validation.constraints.Size;
  * <p>Note what is absent: {@code id}. A client must never choose a primary key. Using a dedicated
  * request record rather than the entity is what makes that guarantee structural instead of a rule
  * somebody has to remember.
+ *
+ * <p>Also absent since Phase 20: {@code stockQuantity}. Creating a sellable product is now two calls
+ * to two services - POST here, then PUT to inventory-service - and there is no transaction spanning
+ * them. An administrator can create a product and then fail to set its stock, leaving a listed item
+ * nobody can buy. That is not an oversight to be fixed with a cleverer API; it is what "no
+ * cross-service transactions" means, and the honest answers to it are a saga (Phase 24) or accepting
+ * that the intermediate state is visible and correctable.
  */
 public record ProductRequest(
 
@@ -27,10 +33,6 @@ public record ProductRequest(
         @NotNull(message = "is required")
         @Positive(message = "must be greater than zero")
         BigDecimal price,
-
-        @NotNull(message = "is required")
-        @PositiveOrZero(message = "must not be negative")
-        Integer stockQuantity,
 
         /*
          * Optional, matching the nullable column V3 added. No @NotBlank: a client that has never

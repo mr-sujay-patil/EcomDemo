@@ -4,8 +4,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.List;
 
-import com.ecomdemo.common.CacheConfiguration;
-import com.ecomdemo.common.NotFoundException;
+import com.ecomdemo.shared.NotFoundException;
 import com.ecomdemo.product.dto.ProductRequest;
 import com.ecomdemo.product.dto.ProductResponse;
 
@@ -20,6 +19,12 @@ import org.springframework.transaction.annotation.Transactional;
  * Business logic for the catalogue. The controller does no work beyond HTTP; the repository does no
  * work beyond persistence. Everything in between - the transaction boundary, the entity-to-DTO
  * mapping, the "does it exist?" check - belongs here.
+ *
+ * <p>Every method here is now cacheable without reservation, which was not true before. Phase 13 had
+ * to carve out {@code requireEntity} as the one lookup that must never be served from Redis, because
+ * it carried stock and fed a decision. With stock in another service, everything this class returns
+ * is display data - so "cache what is read to be displayed, never what is read to make a decision"
+ * stopped being a rule about which method to annotate and became a property of where the data lives.
  */
 @Service
 @Transactional(readOnly = true)
@@ -76,8 +81,7 @@ public class ProductService {
         Product product = new Product(
                 request.name(),
                 request.description(),
-                normalise(request.price()),
-                request.stockQuantity());
+                normalise(request.price()));
         product.setCategory(request.category());
         return ProductResponse.from(productRepository.save(product));
     }
@@ -99,7 +103,6 @@ public class ProductService {
         product.setName(request.name());
         product.setDescription(request.description());
         product.setPrice(normalise(request.price()));
-        product.setStockQuantity(request.stockQuantity());
         product.setCategory(request.category());
         // No save() call needed: the entity is managed inside this transaction, so Hibernate
         // flushes the changes automatically at commit. This is "dirty checking".
@@ -115,43 +118,23 @@ public class ProductService {
         productRepository.delete(requireProduct(id));
     }
 
-    /**
-     * Shared lookup used by this service and, via {@link #requireEntity(Long)}, by the cart and
-     * order services. Throwing here means no caller ever handles an empty Optional.
+    /*
+     * Two methods that were here in Phase 13 and are not any more, both deleted by the split rather
+     * than by a refactor:
+     *
+     *   requireEntity(Long) returned a managed Product carrying stockQuantity, and was what the cart
+     *   and checkout called to make their stock decisions. There is no stock on this entity now, and
+     *   no caller in this process - order-service reads prices over HTTP and asks inventory-service
+     *   about availability. A method that hands out a live entity is exactly what cannot cross a
+     *   service boundary: the thing on the other side would get a detached copy with none of the
+     *   transactional guarantees that made it useful.
+     *
+     *   evictFromCache(Long) existed so that checkout could drop a product from the cache after
+     *   reducing its stock. Nothing outside this service changes a product any more, because stock
+     *   is not a product field, so there is nothing left to evict for. The awkward coupling Phase 13
+     *   accepted - the order feature having to know the catalogue was cached - went away as a side
+     *   effect of putting the two fields in the services that own them.
      */
-    /**
-     * The uncached lookup, and the most important method in this class to leave alone.
-     *
-     * <p>This is what the cart and checkout call, and it returns a managed entity carrying
-     * {@code stockQuantity}. Caching it would hand two simultaneous shoppers the same remembered
-     * stock figure and let both pass the "is there enough?" check - quietly undoing the optimistic
-     * locking Phase 6 added, and overselling exactly the last unit that phase exists to protect.
-     *
-     * <p>More generally: cache what is read to be displayed, never what is read to make a decision.
-     */
-    public Product requireEntity(Long id) {
-        return requireProduct(id);
-    }
-
-    /**
-     * Drops a product from both caches after something outside this feature changed it - checkout
-     * reducing stock, in practice.
-     *
-     * <p>The body is empty on purpose: the work is done by the annotations, which Spring applies
-     * through its proxy when another bean calls this. That is also why it cannot be called from
-     * inside this class - a self-invocation never reaches the proxy, and the eviction would silently
-     * not happen.
-     *
-     * <p>It does couple the order feature to the knowledge that products are cached. The alternative
-     * was letting the catalogue show stock that checkout had already changed, and a visibly wrong
-     * number is worse than a named dependency.
-     */
-    @Caching(evict = {
-            @CacheEvict(cacheNames = CacheConfiguration.PRODUCTS, key = "#productId"),
-            @CacheEvict(cacheNames = CacheConfiguration.PRODUCT_LIST, key = CacheConfiguration.WHOLE_LIST_KEY)})
-    public void evictFromCache(Long productId) {
-        // Intentionally empty - see the Javadoc.
-    }
 
     private Product requireProduct(Long id) {
         return productRepository.findById(id)

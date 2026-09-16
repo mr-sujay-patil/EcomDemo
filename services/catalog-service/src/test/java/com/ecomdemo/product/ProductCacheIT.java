@@ -4,11 +4,10 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.List;
 
-import com.ecomdemo.cart.dto.AddCartItemRequest;
-import com.ecomdemo.common.CacheConfiguration;
+
 import com.ecomdemo.product.dto.ProductRequest;
 import com.ecomdemo.product.dto.ProductResponse;
-import com.ecomdemo.support.AbstractPostgresIT;
+import com.ecomdemo.support.AbstractCatalogServiceIT;
 
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -31,7 +30,7 @@ import static org.awaitility.Awaitility.await;
  * on reading log output.
  *
  * <p>Caching is on here because integration tests run under the {@code dev} profile, against the
- * Redis container in {@link AbstractPostgresIT}. The unit and slice suite runs with
+ * Redis container in {@link AbstractCatalogServiceIT}. The unit and slice suite runs with
  * {@code spring.cache.type=none}, so it neither needs Redis nor tests it.
  *
  * <h2>Why so much of this waits</h2>
@@ -57,7 +56,7 @@ import static org.awaitility.Awaitility.await;
  * The TTLs are minutes, so a two-second window separates "evicted" from "expired" just as decisively
  * as an immediate read would, and it no longer depends on winning a race with the cache's own write.
  */
-class ProductCacheIT extends AbstractPostgresIT {
+class ProductCacheIT extends AbstractCatalogServiceIT {
 
     @Autowired
     private ProductService productService;
@@ -72,9 +71,9 @@ class ProductCacheIT extends AbstractPostgresIT {
     @Autowired
     private StringRedisTemplate redis;
 
-    private ProductResponse createProduct(String name, String price, int stock) {
+    private ProductResponse createProduct(String name, String price) {
         return productService.create(new ProductRequest(
-                name + " " + System.nanoTime(), "cache test", new BigDecimal(price), stock, null));
+                name + " " + System.nanoTime(), "cache test", new BigDecimal(price), null));
     }
 
     /**
@@ -109,7 +108,7 @@ class ProductCacheIT extends AbstractPostgresIT {
             // rather than a race: if the write were still in flight, the second read below would
             // miss, reach the database, and return the new name - reported as "the cache is not
             // working" when the cache was merely one round-trip behind.
-            ProductResponse created = createProduct("Cached Widget", "10.00", 5);
+            ProductResponse created = createProduct("Cached Widget", "10.00");
             String originalName = productService.findById(created.id()).name();
             awaitCached(created.id());
 
@@ -126,7 +125,7 @@ class ProductCacheIT extends AbstractPostgresIT {
         @Test
         void findById_always_writesAnEntryIntoRedisUnderAReadableKey() {
             // GIVEN
-            ProductResponse created = createProduct("Key Visible", "12.00", 3);
+            ProductResponse created = createProduct("Key Visible", "12.00");
 
             // WHEN
             productService.findById(created.id());
@@ -141,7 +140,7 @@ class ProductCacheIT extends AbstractPostgresIT {
         @Test
         void findAll_calledTwice_isServedFromTheListCache() {
             // GIVEN the catalogue read once, and that read actually in the cache
-            ProductResponse created = createProduct("In The List", "20.00", 2);
+            ProductResponse created = createProduct("In The List", "20.00");
             int sizeAfterFirstRead = productService.findAll().size();
             await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
                     assertThat(cacheManager.getCache(CacheConfiguration.PRODUCT_LIST).get("all"))
@@ -149,7 +148,7 @@ class ProductCacheIT extends AbstractPostgresIT {
 
             // WHEN another product appears in the database without the service knowing
             productRepository.saveAndFlush(new Product(
-                    "Snuck In " + System.nanoTime(), "not via the service", new BigDecimal("1.00"), 1));
+                    "Snuck In " + System.nanoTime(), "not via the service", new BigDecimal("1.00")));
 
             // THEN the cached list is unchanged
             assertThat(productService.findAll())
@@ -165,12 +164,12 @@ class ProductCacheIT extends AbstractPostgresIT {
         @Test
         void update_always_replacesTheCachedValue() {
             // GIVEN a cached product
-            ProductResponse created = createProduct("Before Update", "10.00", 5);
+            ProductResponse created = createProduct("Before Update", "10.00");
             productService.findById(created.id());
 
             // WHEN it is updated through the service
             productService.update(created.id(), new ProductRequest(
-                    "After Update", "updated", new BigDecimal("99.00"), 7, "Changed"));
+                    "After Update", "updated", new BigDecimal("99.00"), "Changed"));
 
             // THEN the next read sees the new value. @CachePut wrote it through rather than merely
             // evicting, so this read is still a cache hit - just of the right value.
@@ -193,7 +192,7 @@ class ProductCacheIT extends AbstractPostgresIT {
             // dispatched rather than completed when findById returns, so reading the entry straight
             // afterwards can find nothing there yet. A setup step that fails intermittently is worse
             // than an assertion that does: it reads as the behaviour under test being broken.
-            ProductResponse created = createProduct("To Be Deleted", "10.00", 5);
+            ProductResponse created = createProduct("To Be Deleted", "10.00");
             productService.findById(created.id());
             awaitCached(created.id());
 
@@ -217,7 +216,7 @@ class ProductCacheIT extends AbstractPostgresIT {
             List<Long> before = productService.findAll().stream().map(ProductResponse::id).toList();
 
             // WHEN a product is created through the service
-            ProductResponse created = createProduct("Appears Immediately", "15.00", 4);
+            ProductResponse created = createProduct("Appears Immediately", "15.00");
 
             // THEN it becomes visible - the list entry was dropped rather than left to expire.
             // The TTL is minutes, so anything inside two seconds can only be the eviction.
@@ -230,44 +229,20 @@ class ProductCacheIT extends AbstractPostgresIT {
         }
     }
 
-    @Nested
-    class StockIsNeverServedStale {
-
-        @Test
-        void requireEntity_always_readsTheDatabase() {
-            // GIVEN a product whose DTO has been cached
-            ProductResponse created = createProduct("Stock Truth", "10.00", 5);
-            productService.findById(created.id());
-
-            // WHEN the stock changes in the database without the service knowing
-            Product product = productRepository.findById(created.id()).orElseThrow();
-            product.setStockQuantity(1);
-            productRepository.saveAndFlush(product);
-
-            // THEN the entity lookup - the one checkout uses - sees the truth, because it is not
-            // cached. If it were, two shoppers could both pass the stock check on a remembered
-            // number and oversell the last unit.
-            assertThat(productService.requireEntity(created.id()).getStockQuantity())
-                    .as("requireEntity must never be cached")
-                    .isEqualTo(1);
-        }
-
-        @Test
-        void placingAnOrder_always_evictsTheStaleStockFromTheCatalogue() {
-            // GIVEN a product in the catalogue cache, with its pre-order stock
-            ProductResponse created = createProduct("Sells Out", "10.00", 5);
-            assertThat(productService.findById(created.id()).stockQuantity()).isEqualTo(5);
-
-            // WHEN two of it are bought
-            client.post().uri("/api/cart/items")
-                    .body(new AddCartItemRequest(created.id(), 2))
-                    .exchange().expectStatus().isOk();
-            client.post().uri("/api/orders").exchange().expectStatus().isCreated();
-
-            // THEN the catalogue shows the new figure rather than the remembered one
-            assertThat(productService.findById(created.id()).stockQuantity())
-                    .as("checkout evicts the product it changed")
-                    .isEqualTo(3);
-        }
-    }
+    /*
+     * A third group lived here until Phase 20: StockIsNeverServedStale.
+     *
+     * It asserted that ProductService.requireEntity read the database rather than the cache, and
+     * that placing an order evicted the product whose stock it had changed. Both are meaningless
+     * now - this service has no stock column, no requireEntity, and no knowledge that orders exist.
+     *
+     * The rule those tests defended has not gone away; it has been satisfied structurally instead.
+     * "Never cache what is read to make a decision" used to require care about which method carried
+     * which annotation, because display data and decision data were fields on the same row. They are
+     * in different databases now, and the only service with a cache is the one holding nothing a
+     * checkout depends on. inventory-service owns the decision data and has no Redis at all.
+     *
+     * The equivalent coverage - that two concurrent orders cannot oversell the last unit - is
+     * StockReservationConcurrencyIT in inventory-service.
+     */
 }
