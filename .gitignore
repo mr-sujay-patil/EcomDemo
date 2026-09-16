@@ -1,5 +1,14 @@
 # Maven
 target/
+pom.xml.versionsBackup
+dependency-reduced-pom.xml
+.flattened-pom.xml
+
+# Maven wrapper: the scripts and properties ARE committed so the build is reproducible
+# on a machine with no Maven installed. Only the downloaded distribution is ignored.
+.mvn/wrapper/maven-wrapper.jar
+.mvn/.gradle-enterprise/
+.mvn/.develocity/
 
 # IDE
 .idea/
@@ -10,10 +19,22 @@ target/
 .settings/
 .project
 .classpath
+nbproject/
+.factorypath
+
+# Logs and JVM crash/profiling output
+*.log
+hs_err_pid*
+replay_pid*
+*.hprof
+*.jfr
 
 # OS
 .DS_Store
+Thumbs.db
 
-# Local environment
+# Local environment - never commit secrets
 .env
+.env.local
+.env.*.local
 *.local

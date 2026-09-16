@@ -3,7 +3,7 @@
 A learning project that grows an e-commerce backend from a single Spring Boot monolith into a
 production-grade distributed system, adding **exactly one** technology per phase.
 
-The full plan lives in [`docs/ROADMAP.md`](docs/Roadmap.md). Decisions made along the way are
+The full plan lives in [`docs/ROADMAP.md`](docs/ROADMAP.md). Decisions made along the way are
 recorded in [`docs/decisions.md`](docs/decisions.md).
 
 **Stack:** Java 21 · Spring Boot 4.1.1 · Maven
