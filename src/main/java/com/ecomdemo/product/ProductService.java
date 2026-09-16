@@ -47,7 +47,7 @@ public class ProductService {
      * the list from individually cached products) is a great deal of machinery for a shop with ten
      * products.
      */
-    @Cacheable(cacheNames = CacheConfiguration.PRODUCT_LIST)
+    @Cacheable(cacheNames = CacheConfiguration.PRODUCT_LIST, key = CacheConfiguration.WHOLE_LIST_KEY)
     public List<ProductResponse> findAll() {
         return productRepository.findAll().stream()
                 .map(ProductResponse::from)
@@ -70,7 +70,7 @@ public class ProductService {
      * A new product changes what the catalogue contains, so the list entry is dropped. The product's
      * own entry needs nothing: nobody has asked for an id that did not exist a moment ago.
      */
-    @CacheEvict(cacheNames = CacheConfiguration.PRODUCT_LIST, allEntries = true)
+    @CacheEvict(cacheNames = CacheConfiguration.PRODUCT_LIST, key = CacheConfiguration.WHOLE_LIST_KEY)
     @Transactional
     public ProductResponse create(ProductRequest request) {
         Product product = new Product(
@@ -92,7 +92,7 @@ public class ProductService {
      */
     @Caching(
             put = @CachePut(cacheNames = CacheConfiguration.PRODUCTS, key = "#id"),
-            evict = @CacheEvict(cacheNames = CacheConfiguration.PRODUCT_LIST, allEntries = true))
+            evict = @CacheEvict(cacheNames = CacheConfiguration.PRODUCT_LIST, key = CacheConfiguration.WHOLE_LIST_KEY))
     @Transactional
     public ProductResponse update(Long id, ProductRequest request) {
         Product product = requireProduct(id);
@@ -109,7 +109,7 @@ public class ProductService {
     /** Both caches, because the product is gone from each. */
     @Caching(evict = {
             @CacheEvict(cacheNames = CacheConfiguration.PRODUCTS, key = "#id"),
-            @CacheEvict(cacheNames = CacheConfiguration.PRODUCT_LIST, allEntries = true)})
+            @CacheEvict(cacheNames = CacheConfiguration.PRODUCT_LIST, key = CacheConfiguration.WHOLE_LIST_KEY)})
     @Transactional
     public void delete(Long id) {
         productRepository.delete(requireProduct(id));
@@ -148,7 +148,7 @@ public class ProductService {
      */
     @Caching(evict = {
             @CacheEvict(cacheNames = CacheConfiguration.PRODUCTS, key = "#productId"),
-            @CacheEvict(cacheNames = CacheConfiguration.PRODUCT_LIST, allEntries = true)})
+            @CacheEvict(cacheNames = CacheConfiguration.PRODUCT_LIST, key = CacheConfiguration.WHOLE_LIST_KEY)})
     public void evictFromCache(Long productId) {
         // Intentionally empty - see the Javadoc.
     }

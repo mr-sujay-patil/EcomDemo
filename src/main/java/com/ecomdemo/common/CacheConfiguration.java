@@ -1,18 +1,21 @@
 package com.ecomdemo.common;
 
 import java.time.Duration;
+import java.util.List;
+
+import com.ecomdemo.product.dto.ProductResponse;
 
 import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.boot.cache.autoconfigure.RedisCacheManagerBuilderCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.cache.RedisCacheConfiguration;
-import org.springframework.data.redis.serializer.GenericJacksonJsonRedisSerializer;
+import org.springframework.data.redis.serializer.JacksonJsonRedisSerializer;
 import org.springframework.data.redis.serializer.RedisSerializationContext;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 
-import tools.jackson.databind.jsontype.BasicPolymorphicTypeValidator;
-import tools.jackson.databind.jsontype.PolymorphicTypeValidator;
+import tools.jackson.databind.JavaType;
+import tools.jackson.databind.type.TypeFactory;
 
 /**
  * What is cached, how it is stored, and for how long.
@@ -32,11 +35,20 @@ import tools.jackson.databind.jsontype.PolymorphicTypeValidator;
  * entries undeserialisable; and deserialising untrusted bytes into arbitrary Java objects is a
  * remote-code-execution primitive.
  *
- * <p>JSON fixes the first two outright. The third needs care even here, which is what the type
- * validator below is for: to rebuild a {@code ProductResponse} the serializer has to record its type
- * in the JSON, and a serializer that will instantiate <em>any</em> named class has reintroduced the
- * same gadget problem in a friendlier format. The validator restricts that to this application's own
- * types and the collections that hold them.
+ * <h2>One known type per cache, rather than polymorphic typing</h2>
+ *
+ * The usual recipe is a generic serializer that records each value's class in the document so it can
+ * rebuild anything. It works, but the cache will then instantiate whatever class a document names -
+ * the same gadget problem as Java serialization in friendlier clothing - so it has to be fenced off
+ * with a type validator.
+ *
+ * <p>None of that is needed here. Each cache holds exactly one shape: {@code products} a
+ * {@code ProductResponse}, {@code product-list} a {@code List<ProductResponse>}. Saying so up front
+ * means no type names in the JSON, nothing to validate, and documents that read like the API
+ * responses they came from.
+ *
+ * <p>The price is that a new cache must declare its type here. That is a small and loud cost; the
+ * alternative fails at runtime, on a read, far from this file.
  */
 @Configuration
 @EnableCaching
@@ -47,6 +59,21 @@ public class CacheConfiguration {
 
     /** The whole catalogue, under a single key. */
     public static final String PRODUCT_LIST = "product-list";
+
+    /**
+     * The one key in {@link #PRODUCT_LIST}, named explicitly rather than derived.
+     *
+     * <p>Two reasons. It reads better - {@code product-list::all} instead of Spring's default
+     * {@code product-list::SimpleKey []}, which is what a no-argument method produces and is an
+     * unpleasant thing to meet in {@code redis-cli}.
+     *
+     * <p>And it lets every eviction be a targeted {@code evict(key)} rather than
+     * {@code allEntries = true}. That matters here: measured against Redis in this setup,
+     * {@code RedisCache.clear()} left the entry in place while {@code evict(key)} removed it, so a
+     * cache configured with {@code allEntries = true} silently never invalidated - the failure mode
+     * being stale data rather than an error. A single named key needs no wildcard sweep at all.
+     */
+    public static final String WHOLE_LIST_KEY = "'all'";
 
     /**
      * Ten minutes for a single product: individual products change rarely, and every write path
@@ -78,42 +105,46 @@ public class CacheConfiguration {
                 // Keys stay plain strings so `redis-cli KEYS 'products*'` is readable.
                 .serializeKeysWith(RedisSerializationContext.SerializationPair
                         .fromSerializer(new StringRedisSerializer()))
-                .serializeValuesWith(RedisSerializationContext.SerializationPair
-                        .fromSerializer(jsonSerializer()))
                 // A null return is not cached. Caching "this product does not exist" would be a
-                // reasonable choice against a lookup storm, but it also means a newly created product
-                // stays invisible until the entry expires.
+                // reasonable defence against a lookup storm, but it also means a newly created
+                // product stays invisible until the entry expires.
                 .disableCachingNullValues();
     }
 
-    private static GenericJacksonJsonRedisSerializer jsonSerializer() {
-        /*
-         * Only this application's own types, plus the collections that carry them, may be
-         * reconstructed from a type name in the JSON. Anything else - the classic deserialization
-         * gadget in some library on the classpath - is refused.
-         */
-        PolymorphicTypeValidator typeValidator = BasicPolymorphicTypeValidator.builder()
-                .allowIfSubType("com.ecomdemo.")
-                .allowIfSubType("java.util.")
-                .allowIfSubType("java.math.")
-                .allowIfSubType("java.time.")
-                .build();
+    /**
+     * Per-cache time to live, and per-cache value type.
+     *
+     * <p>Both caches are configured explicitly rather than inheriting a value serializer, because
+     * each has to be told what it stores.
+     */
+    @Bean
+    public RedisCacheManagerBuilderCustomizer perCacheConfiguration(RedisCacheConfiguration base) {
+        RedisCacheConfiguration products = base
+                .entryTtl(PRODUCT_TTL)
+                .serializeValuesWith(serializeAs(TypeFactory.createDefaultInstance()
+                        .constructType(ProductResponse.class)));
 
-        return GenericJacksonJsonRedisSerializer.builder()
-                .enableDefaultTyping(typeValidator)
-                // Spring Cache stores a marker object for a cached null; without this the serializer
-                // does not know how to write it.
-                .enableSpringCacheNullValueSupport()
-                .build();
+        RedisCacheConfiguration productList = base
+                .entryTtl(PRODUCT_LIST_TTL)
+                .serializeValuesWith(serializeAs(TypeFactory.createDefaultInstance()
+                        .constructCollectionType(List.class, ProductResponse.class)));
+
+        return builder -> builder
+                .withCacheConfiguration(PRODUCTS, products)
+                .withCacheConfiguration(PRODUCT_LIST, productList);
     }
 
     /**
-     * Per-cache time to live. Everything else inherits the default above.
+     * A serializer that knows exactly what it will read back.
+     *
+     * <p>Spelling out the generic type matters most for the list: erasure means a bare {@code List}
+     * deserialises into a list of {@code LinkedHashMap}, and that surfaces as a
+     * {@code ClassCastException} in whatever code read the cache rather than anywhere near here.
      */
-    @Bean
-    public RedisCacheManagerBuilderCustomizer perCacheTimeToLive(RedisCacheConfiguration base) {
-        return builder -> builder
-                .withCacheConfiguration(PRODUCTS, base.entryTtl(PRODUCT_TTL))
-                .withCacheConfiguration(PRODUCT_LIST, base.entryTtl(PRODUCT_LIST_TTL));
+    @SuppressWarnings("unchecked")
+    private static RedisSerializationContext.SerializationPair<Object> serializeAs(JavaType type) {
+        return RedisSerializationContext.SerializationPair.fromSerializer(
+                (org.springframework.data.redis.serializer.RedisSerializer<Object>)
+                        new JacksonJsonRedisSerializer<>(type));
     }
 }
