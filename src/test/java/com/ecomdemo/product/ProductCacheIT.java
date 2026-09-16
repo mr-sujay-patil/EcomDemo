@@ -34,25 +34,28 @@ import static org.awaitility.Awaitility.await;
  * Redis container in {@link AbstractPostgresIT}. The unit and slice suite runs with
  * {@code spring.cache.type=none}, so it neither needs Redis nor tests it.
  *
- * <h2>Why the write-path assertions wait</h2>
+ * <h2>Why so much of this waits</h2>
  *
- * Every assertion in {@code WritesInvalidateTheCache} is wrapped in {@code await()}, and the reason
- * is a property of the cache rather than a flaky test. In Spring Data Redis 4,
+ * Nearly every read of the cache here is wrapped in {@code await()}, and the reason is a property of
+ * the cache rather than a flaky test. In Spring Data Redis 4,
  * {@code RedisCacheWriter.store} returns a {@code CompletableFuture} - a cache write is dispatched,
  * not completed, by the time {@code @Cacheable} or {@code @CachePut} returns. Two consequences, both
  * observed here: a {@code put} still in flight can reach Redis <em>after</em> a {@code del} issued
  * later, so an evicted entry reappears; and a read immediately after a write-through can still be
  * served the value that write is replacing.
  *
- * <p>The window is sub-millisecond and it took until Phase 17 to see it: the Kafka listener
- * containers added polling threads to the same JVM, shifted the scheduling, and turned an
- * always-green assertion into one that failed roughly two runs in five. Nothing in the caching code
- * changed.
+ * <p>It bites in setup as much as in assertions: reading an entry straight after the {@code findById}
+ * that should have cached it can find nothing there yet, which reads as "the cache is not working"
+ * when the cache was one round-trip behind.
  *
- * <p>Waiting is the honest assertion, not a weakened one. What these tests must prove is that a
- * write path <em>evicts</em> rather than leaving the entry to expire - the TTLs are minutes, so a
- * two-second window separates "evicted" from "expired" just as decisively as an immediate read
- * would, and it no longer depends on winning a race with the cache's own write.
+ * <p>The window is sub-millisecond and it took until Phase 17 to see it: the Kafka listener
+ * containers added polling threads to the same JVM, shifted the scheduling, and turned always-green
+ * assertions into ones that failed roughly two runs in five. Nothing in the caching code changed.
+ *
+ * <p>Waiting is the honest assertion, not a weakened one. What these tests must prove is that a read
+ * is served from Redis and that a write path <em>evicts</em> rather than leaving the entry to expire.
+ * The TTLs are minutes, so a two-second window separates "evicted" from "expired" just as decisively
+ * as an immediate read would, and it no longer depends on winning a race with the cache's own write.
  */
 class ProductCacheIT extends AbstractPostgresIT {
 
@@ -74,6 +77,20 @@ class ProductCacheIT extends AbstractPostgresIT {
                 name + " " + System.nanoTime(), "cache test", new BigDecimal(price), stock, null));
     }
 
+    /**
+     * Waits for a product's cache entry to actually exist.
+     *
+     * <p>Needed because a cache write is dispatched rather than completed when the cached method
+     * returns - see the class comment. Two seconds is three orders of magnitude more than the write
+     * takes and three orders of magnitude less than the TTL, so it can only ever hide the race it is
+     * there to absorb.
+     */
+    private void awaitCached(Long productId) {
+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
+                assertThat(cacheManager.getCache(CacheConfiguration.PRODUCTS).get(productId))
+                        .isNotNull());
+    }
+
     /** Changes the row without going through any cached method. */
     private void renameBehindTheCachesBack(Long id, String newName) {
         Product product = productRepository.findById(id).orElseThrow();
@@ -86,9 +103,15 @@ class ProductCacheIT extends AbstractPostgresIT {
 
         @Test
         void findById_calledTwice_returnsTheCachedValueTheSecondTime() {
-            // GIVEN a product read once, which populates the cache
+            // GIVEN a product read once, and that read actually in the cache.
+            //
+            // Waiting for the entry to appear is what makes the rest of this a test of caching
+            // rather than a race: if the write were still in flight, the second read below would
+            // miss, reach the database, and return the new name - reported as "the cache is not
+            // working" when the cache was merely one round-trip behind.
             ProductResponse created = createProduct("Cached Widget", "10.00", 5);
             String originalName = productService.findById(created.id()).name();
+            awaitCached(created.id());
 
             // WHEN the row is changed without going through the service
             renameBehindTheCachesBack(created.id(), "Changed In The Database");
@@ -110,15 +133,19 @@ class ProductCacheIT extends AbstractPostgresIT {
 
             // THEN the key is there, and it is legible - which is the practical argument for JSON
             // over Java serialization: redis-cli tells you what is cached.
-            assertThat(redis.keys("products::*"))
-                    .anyMatch(key -> key.endsWith("::" + created.id()));
+            await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
+                    assertThat(redis.keys("products::*"))
+                            .anyMatch(key -> key.endsWith("::" + created.id())));
         }
 
         @Test
         void findAll_calledTwice_isServedFromTheListCache() {
-            // GIVEN the catalogue read once
+            // GIVEN the catalogue read once, and that read actually in the cache
             ProductResponse created = createProduct("In The List", "20.00", 2);
             int sizeAfterFirstRead = productService.findAll().size();
+            await().atMost(Duration.ofSeconds(2)).untilAsserted(() ->
+                    assertThat(cacheManager.getCache(CacheConfiguration.PRODUCT_LIST).get("all"))
+                            .isNotNull());
 
             // WHEN another product appears in the database without the service knowing
             productRepository.saveAndFlush(new Product(
@@ -160,10 +187,15 @@ class ProductCacheIT extends AbstractPostgresIT {
 
         @Test
         void delete_always_removesTheEntry() {
-            // GIVEN a cached product
+            // GIVEN a cached product.
+            //
+            // The precondition waits for the same reason the assertions do - @Cacheable's write is
+            // dispatched rather than completed when findById returns, so reading the entry straight
+            // afterwards can find nothing there yet. A setup step that fails intermittently is worse
+            // than an assertion that does: it reads as the behaviour under test being broken.
             ProductResponse created = createProduct("To Be Deleted", "10.00", 5);
             productService.findById(created.id());
-            assertThat(cacheManager.getCache("products").get(created.id())).isNotNull();
+            awaitCached(created.id());
 
             // WHEN
             productService.delete(created.id());
