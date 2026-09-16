@@ -52,6 +52,18 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!--
+            Spring Boot 4 split the auto-configurations out of spring-boot-autoconfigure into
+            per-technology modules, so the H2 web console is no longer configured just by having h2
+            on the classpath. This module supplies H2ConsoleAutoConfiguration, which spring.h2.console
+            in application.yml then switches on. Version comes from the parent POM.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-h2console</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
         <!-- JUnit 5, AssertJ, @SpringBootTest and TestRestTemplate. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

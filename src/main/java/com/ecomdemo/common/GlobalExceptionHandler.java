@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 /**
  * Translates exceptions thrown anywhere below a controller into the single {@link ApiError} shape.
@@ -71,6 +72,16 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
     public ResponseEntity<ApiError> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
         return build(HttpStatus.BAD_REQUEST, "Parameter '" + ex.getName() + "' has an invalid value");
+    }
+
+    /**
+     * No handler and no static resource matched the URL. Spring raises this for any unknown path;
+     * without an explicit mapping it would fall through to the catch-all below and be reported as a
+     * 500, turning every typo in a URL into a fake server error.
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ApiError> handleNoResource(NoResourceFoundException ex) {
+        return build(HttpStatus.NOT_FOUND, "No endpoint " + ex.getResourcePath());
     }
 
     /** An argument a service rejected outright. */
