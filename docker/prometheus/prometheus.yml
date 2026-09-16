@@ -1,0 +1,38 @@
+# Prometheus pulls; it is never pushed to.
+#
+# This is the model's defining property and the reason the application needs no Prometheus
+# configuration of its own: the app exposes a page of numbers at /actuator/prometheus and has no idea
+# whether anyone reads it. Prometheus decides who to scrape, how often, and what to do when a target
+# stops answering - which is itself a signal ("up == 0"), something a push model cannot distinguish
+# from a service that simply had nothing to say.
+global:
+  # Every 10s. The scrape interval is the resolution of every graph drawn from this data: a rate()
+  # over a window shorter than two intervals cannot be computed, which is why the dashboard's
+  # rate windows are minutes rather than seconds.
+  scrape_interval: 10s
+
+  # How often the alerting rules below are evaluated. Kept equal to the scrape interval so a rule
+  # never re-evaluates the same samples twice.
+  evaluation_interval: 10s
+
+# Rules are loaded from here. A rules file that nobody references is the classic silent failure of
+# this stack - the file is valid, the rule is right, and it never runs.
+rule_files:
+  - /etc/prometheus/alert-rules.yml
+
+scrape_configs:
+  # The application.
+  - job_name: ecomdemo
+    # Not the default /metrics. Actuator serves the Prometheus exposition format under its own path.
+    metrics_path: /actuator/prometheus
+    static_configs:
+      # `app`, not localhost - the same container-networking rule as everywhere else in this stack.
+      # localhost inside the Prometheus container is Prometheus.
+      - targets: ["app:8080"]
+
+  # Prometheus scraping itself, so the monitoring is monitored. Cheap, and the first thing you want
+  # when a dashboard looks wrong: it distinguishes "the app stopped reporting" from "Prometheus
+  # stopped collecting".
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

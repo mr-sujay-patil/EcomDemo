@@ -1,0 +1,40 @@
+# One rule. The point of this phase is to understand the shape of an alert, not to build a rota.
+groups:
+  - name: ecomdemo-http
+    rules:
+      - alert: HighServerErrorRate
+        # Server errors as a fraction of all requests, over a five-minute sliding window.
+        #
+        # rate() over a counter, not the counter itself: counters only ever rise and reset to zero
+        # when the process restarts, so the raw value answers "how many since this JVM started",
+        # which is never the question. rate() turns that into per-second change and handles the
+        # reset, which is why counters are the type you can actually alert on.
+        #
+        # outcome="SERVER_ERROR" is Spring's own tag on http.server.requests - 5xx only. A 404 or a
+        # 409 is the application working correctly and must not page anyone.
+        #
+        # When no requests are arriving the denominator is zero, the expression is NaN, and the
+        # comparison is false. A quiet service is not a broken one.
+        expr: >
+          sum(rate(http_server_requests_seconds_count{outcome="SERVER_ERROR"}[5m]))
+          /
+          sum(rate(http_server_requests_seconds_count[5m]))
+          > 0.05
+
+        # The most important line in the file.
+        #
+        # Without `for`, a single 500 during a quiet minute is a 100% error rate and an instant page.
+        # `for` requires the condition to hold continuously for two minutes before the alert fires,
+        # which is what separates an incident from a blip. It is also why an alert's window and its
+        # `for` are a pair: five minutes of data, two minutes of persistence.
+        for: 2m
+
+        labels:
+          severity: warning
+
+        annotations:
+          summary: "More than 5% of requests are failing with 5xx"
+          description: >
+            {{ $value | humanizePercentage }} of requests to ecomdemo returned a server error over
+            the last 5 minutes. Check the application logs and the error-rate panel on the EcomDemo
+            dashboard.

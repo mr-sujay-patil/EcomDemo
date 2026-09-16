@@ -1,0 +1,850 @@
+{
+  "uid": "ecomdemo-overview",
+  "title": "EcomDemo Overview",
+  "description": "RED for the request path, USE for the resources, and the business metrics Phase 15 added. Provisioned from docker/grafana/dashboards/ecomdemo.json.",
+  "tags": [
+    "ecomdemo"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "type": "row",
+      "title": "RED - the request path (Rate, Errors, Duration)",
+      "id": 1,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate by outcome",
+      "description": "R in RED. Every HTTP request Spring served, split by Spring's own outcome tag. rate() over a counter, because the counter itself only answers 'how many since this JVM started'.",
+      "id": 2,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ecomdemo-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "fillOpacity": 18,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "sum by (outcome) (rate(http_server_requests_seconds_count{application=\"ecomdemo\"}[$__rate_interval]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Error rate (5xx)",
+      "description": "E in RED, and the expression the HighServerErrorRate alert fires on. Red above 5%.",
+      "id": 3,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ecomdemo-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.01
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "sum(rate(http_server_requests_seconds_count{application=\"ecomdemo\",outcome=\"SERVER_ERROR\"}[$__rate_interval])) / sum(rate(http_server_requests_seconds_count{application=\"ecomdemo\"}[$__rate_interval]))"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Requests in flight",
+      "description": "Concurrency right now, from the Tomcat thread pool.",
+      "id": 4,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ecomdemo-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "sum(tomcat_threads_busy_threads{application=\"ecomdemo\"})"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Latency percentiles",
+      "description": "D in RED. Computed from the histogram buckets, not from a per-instance percentile: buckets are counters and can be summed across replicas, whereas pre-computed percentiles cannot be averaged.",
+      "id": 5,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ecomdemo-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(http_server_requests_seconds_bucket{application=\"ecomdemo\"}[$__rate_interval])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{application=\"ecomdemo\"}[$__rate_interval])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_requests_seconds_bucket{application=\"ecomdemo\"}[$__rate_interval])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Slowest endpoints (p95)",
+      "description": "The same histogram, split by URI template. Templates, never raw paths - /api/orders/{id} is one series, while one series per id would be unbounded cardinality.",
+      "id": 6,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ecomdemo-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "topk(5, histogram_quantile(0.95, sum by (le, uri) (rate(http_server_requests_seconds_bucket{application=\"ecomdemo\"}[$__rate_interval]))))",
+          "legendFormat": "{{uri}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Business - what the shop is doing",
+      "id": 7,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Orders placed (total)",
+      "description": "The raw counter. Resets to zero when the JVM restarts, which is why every other panel uses rate().",
+      "id": 8,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ecomdemo-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "sum(orders_placed_total{application=\"ecomdemo\"})"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Orders per minute",
+      "description": "orders.placed as a rate. This is the line that should move while the README's curl flow runs.",
+      "id": 9,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ecomdemo-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 18,
+        "x": 6,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "sum(rate(orders_placed_total{application=\"ecomdemo\"}[$__rate_interval])) * 60",
+          "legendFormat": "orders/min"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Order value distribution",
+      "description": "From order.value, a DistributionSummary. p50 is the typical basket; the gap to p95 is the shape a mean would have hidden entirely.",
+      "id": 10,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ecomdemo-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(order_value_bucket{application=\"ecomdemo\"}[$__rate_interval])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(order_value_bucket{application=\"ecomdemo\"}[$__rate_interval])))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkout attempts by outcome",
+      "description": "order.checkout, one sample per attempt. A conflict line above zero is Phase 6's optimistic locking doing its job - two shoppers racing for the same unit - and nothing before this phase could show it happening.",
+      "id": 11,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ecomdemo-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "fillOpacity": 18,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "sum by (outcome) (rate(order_checkout_seconds_count{application=\"ecomdemo\"}[$__rate_interval]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "USE - the resources (Utilisation, Saturation, Errors)",
+      "id": 12,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "JVM heap",
+      "description": "Utilisation. Used against committed, per memory pool.",
+      "id": 13,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ecomdemo-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "sum by (id) (jvm_memory_used_bytes{application=\"ecomdemo\",area=\"heap\"})",
+          "legendFormat": "used {{id}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "sum(jvm_memory_committed_bytes{application=\"ecomdemo\",area=\"heap\"})",
+          "legendFormat": "committed"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "GC pause time",
+      "description": "Saturation. Time spent collecting is time not spent serving.",
+      "id": 14,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ecomdemo-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 35
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "sum by (action) (rate(jvm_gc_pause_seconds_sum{application=\"ecomdemo\"}[$__rate_interval]))",
+          "legendFormat": "{{action}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU",
+      "description": "Utilisation. The process against the whole machine.",
+      "id": 15,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ecomdemo-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "process_cpu_usage{application=\"ecomdemo\"}",
+          "legendFormat": "process"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "system_cpu_usage{application=\"ecomdemo\"}",
+          "legendFormat": "system"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Database connection pool",
+      "description": "Saturation, and the panel most likely to explain a latency spike. `pending` above zero means requests are queuing for a connection - the pool is the bottleneck, not the database.",
+      "id": 16,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ecomdemo-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "hikaricp_connections_active{application=\"ecomdemo\"}",
+          "legendFormat": "active"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "hikaricp_connections_idle{application=\"ecomdemo\"}",
+          "legendFormat": "idle"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ecomdemo-prometheus"
+          },
+          "expr": "hikaricp_connections_pending{application=\"ecomdemo\"}",
+          "legendFormat": "pending"
+        }
+      ]
+    }
+  ]
+}

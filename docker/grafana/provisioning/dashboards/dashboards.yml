@@ -1,0 +1,19 @@
+# Where Grafana looks for dashboard JSON on disk.
+apiVersion: 1
+
+providers:
+  - name: ecomdemo
+    orgId: 1
+    folder: EcomDemo
+    type: file
+
+    # The dashboards are owned by the repository. Editing one in the UI is fine for experimenting,
+    # but the file wins on the next reload - which is the intended behaviour: the version in git is
+    # the one that exists.
+    allowUiUpdates: false
+    disableDeletion: false
+    updateIntervalSeconds: 30
+
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -1,0 +1,30 @@
+# Grafana's data sources as a file, not as something clicked in the UI.
+#
+# A data source added by hand lives in Grafana's own database, which lives in a volume. Rebuild the
+# volume and it is gone, and nobody can tell from the repository that it was ever there. Provisioned
+# from a file, the stack comes up complete on a machine that has never run it.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+
+    # A stable uid, referenced by every panel in the dashboard JSON. Left unset, Grafana generates a
+    # random one per install and the provisioned dashboard's panels point at a data source that does
+    # not exist on any other machine - the dashboard loads, and every panel says "Datasource not
+    # found".
+    uid: ecomdemo-prometheus
+
+    # proxy: the browser asks the Grafana server, which asks Prometheus. The alternative (`direct`)
+    # would have the browser call Prometheus itself, which only works if Prometheus is reachable
+    # from the user's machine - it is not, and deliberately so.
+    access: proxy
+
+    # Service name on the compose network, not localhost.
+    url: http://prometheus:9090
+    isDefault: true
+
+    jsonData:
+      # Tells Grafana the scrape interval, so $__rate_interval resolves to something sensible rather
+      # than to a window too short for rate() to return anything.
+      timeInterval: 10s
