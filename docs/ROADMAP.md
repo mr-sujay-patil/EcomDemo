@@ -47,7 +47,7 @@ flowchart LR
 | Phase | Technology | Stage | Status |
 |---|---|---|---|
 | 0 | Baseline monolith (Spring Boot + H2) | Foundation | ✅ Complete |
-| 1 | Git & GitHub workflow | Foundation | ⬜ |
+| 1 | Git & GitHub workflow | Foundation | ✅ Complete |
 | 2 | Automated testing (JUnit 5, Mockito, MockMvc) | Foundation | ⬜ |
 | 3 | API documentation (OpenAPI / Swagger) | Foundation | ⬜ |
 | 4 | PostgreSQL | Data | ⬜ |
