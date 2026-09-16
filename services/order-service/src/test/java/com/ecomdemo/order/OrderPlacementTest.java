@@ -11,6 +11,7 @@ import com.ecomdemo.order.client.InventoryClient;
 import com.ecomdemo.order.client.ReservationRequest;
 import com.ecomdemo.order.dto.OrderResponse;
 import com.ecomdemo.shared.ConflictException;
+import com.ecomdemo.shared.ServiceUnavailableException;
 import com.ecomdemo.support.TestFixtures;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -54,7 +55,8 @@ import static org.mockito.Mockito.verify;
  *   <li>inventory-service cannot be reached at all - nobody's fault, and must not be reported as if
  *       the cart were at fault;
  *   <li>catalog-service cannot be reached - there is no cached price to fall back on and charging
- *       from a stale one would be worse than failing;
+ *       from a stale one would be worse than failing. Since Phase 22 that is reported as a 503
+ *       rather than a 409, because it is our fault and not the shopper's;
  *   <li><strong>the order fails to save after the stock was reserved</strong> - the one case no
  *       transaction can cover, and the one this phase leaves only partly solved.
  * </ul>
@@ -253,9 +255,13 @@ class OrderPlacementTest {
             // WHEN / THEN there is no cached price and no fallback, on purpose. Charging somebody
             // from a stale number is worse than telling them to try again, so this is a place where
             // a dependency being down genuinely means this service cannot do its job.
+            //
+            // 503 since Phase 22, not the 409 this asserted before. The distinction is the point of
+            // the change: 409 told the shopper their cart was the problem, sending them to rebuild
+            // something that was never wrong, and hid the outage behind a status nobody alerts on.
             assertThatThrownBy(() -> orderPlacement.placeOnce(CUSTOMER_ID))
-                    .isInstanceOf(ConflictException.class)
-                    .hasMessageContaining("catalog-service is unavailable");
+                    .isInstanceOf(ServiceUnavailableException.class)
+                    .hasMessageContaining("temporarily unavailable");
             verify(inventoryClient, never()).reserve(any());
         }
 
@@ -268,10 +274,11 @@ class OrderPlacementTest {
             willThrow(new ResourceAccessException("connection refused"))
                     .given(inventoryClient).reserve(any());
 
-            // WHEN / THEN
+            // WHEN / THEN 503 rather than 409: no stock was taken and nothing about the cart is
+            // wrong. Blaming the cart for our outage is both unhelpful and, on a dashboard, silent.
             assertThatThrownBy(() -> orderPlacement.placeOnce(CUSTOMER_ID))
-                    .isInstanceOf(ConflictException.class)
-                    .hasMessageContaining("inventory-service is unavailable");
+                    .isInstanceOf(ServiceUnavailableException.class)
+                    .hasMessageContaining("temporarily unavailable");
             verify(orderWriter, never()).saveOrder(anyLong(), anyList(), anyList(), anyMap());
         }
 
