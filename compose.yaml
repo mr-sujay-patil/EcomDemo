@@ -1,0 +1,104 @@
+# The whole system: the application and the database it needs, started together.
+#
+# `docker compose up` replaces every manual step the README has accumulated since Phase 4 - no
+# `docker run` to remember, no locally installed PostgreSQL, no waiting to see whether the database
+# was ready before starting the app.
+
+name: ecomdemo
+
+services:
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ecomdemo}
+      POSTGRES_USER: ${POSTGRES_USER:-ecomdemo}
+      # :? means compose refuses to start and prints this message if the variable is unset. Better
+      # than a default: a password nobody chose is a password everybody knows.
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - copy .env.example}"
+
+    volumes:
+      # A named volume, managed by Docker and living outside the container's writable layer.
+      #
+      # Everything a container writes to its own filesystem dies with the container, and `docker
+      # compose down` deletes containers. The database would be empty every morning. The volume
+      # survives down/up, image rebuilds and upgrades of the postgres image; only `down -v` removes
+      # it, which is exactly the "and I mean it" switch.
+      #
+      # The path matters: PostgreSQL 18 declares /var/lib/postgresql, not the /var/lib/postgresql/data
+      # that every older example uses. Mounting the old path succeeds and silently persists nothing.
+      - pgdata:/var/lib/postgresql
+
+    # No published port. The application reaches this database over the compose network, not through
+    # the host - see the app's POSTGRES_URL below. Publishing it would also collide with the
+    # standalone container from Phase 4 if that is still running. To inspect it from DBeaver, add:
+    #   ports: ["5432:5432"]
+    healthcheck:
+      # pg_isready asks the server whether it is accepting connections. The point is the app's
+      # depends_on below: without it, compose starts both at once, the application wins the race,
+      # Flyway cannot connect, and the container exits before PostgreSQL has finished initialising.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ecomdemo} -d ${POSTGRES_DB:-ecomdemo}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      # A first start initialises the data directory, which takes a moment. Failures during this
+      # window do not count against `retries`.
+      start_period: 15s
+
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    depends_on:
+      postgres:
+        # Not just "started" - "started and answering". This is the single most valuable line in the
+        # file, and the default (service_started) is what makes people add sleeps to entrypoints.
+        condition: service_healthy
+
+    environment:
+      # postgres, not localhost.
+      #
+      # Every container gets its own network namespace, so localhost inside this container is this
+      # container - there is no database there. Compose puts both services on one network and runs a
+      # DNS server that resolves each service name to its container's address, so `postgres` is the
+      # hostname and 5432 is the port *inside* that container, published or not.
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-ecomdemo}
+      POSTGRES_USER: ${POSTGRES_USER:-ecomdemo}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - copy .env.example}"
+
+      # Without this the application generates a random signing key on every start, so every restart
+      # invalidates every token that was issued before it (Phase 9).
+      # Quoted: the message contains ": ", and an unquoted YAML scalar containing that
+      # is parsed as a mapping.
+      JWT_SECRET: "${JWT_SECRET:?set JWT_SECRET in .env - generate one with openssl rand -base64 48}"
+
+    ports:
+      # host:container. The only port this system exposes to the outside world.
+      - "8080:8080"
+
+    # A memory limit, so -XX:MaxRAMPercentage in the Dockerfile has something to be a percentage of.
+    # Unlimited is the default, and then the JVM sizes its heap against the whole host.
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+
+    healthcheck:
+      # There is no /actuator/health until Phase 15, so this probes a real public endpoint: a 200
+      # here means Tomcat, the security filter chain and a database query all work, which is more
+      # than a port check would tell us. wget comes from busybox in the Alpine base - no extra
+      # package, and no curl in the image.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/api/products || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      # Generous: a cold JVM plus Flyway migrations on a new database.
+      start_period: 45s
+
+    restart: unless-stopped
+
+volumes:
+  pgdata:
