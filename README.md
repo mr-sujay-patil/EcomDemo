@@ -1077,3 +1077,88 @@ that no secret is a literal. Every one of those regressions produces a stack tha
   minutes. That is the dependency layer doing its job, not a fault.
 - The compose stack and the standalone `ecomdemo-postgres` container from Phase 4 are **separate
   databases** with separate volumes. Data does not move between them.
+
+---
+
+## Phase 11 — Continuous Integration
+
+**Added:** GitHub Actions. Every pull request is built and tested automatically, and every merge to
+`main` publishes a container image.
+
+- **`.github/workflows/ci.yml`** — a `verify` job on PRs and on `main`, and a `publish` job that
+  depends on it and runs only on `main`.
+- **Branch protection** — `Build and test` is a required status check, so a red build cannot merge.
+- **Test reports** uploaded as artifacts, including when the build fails.
+- **`.github/dependabot.yml`** — weekly Maven and GitHub Actions updates.
+
+### What runs, and when
+
+| Trigger | `verify` | `publish` |
+|---|---|---|
+| Pull request → `main` | ✅ | skipped |
+| Push to `main` (a merge) | ✅ | ✅ → GHCR |
+
+Both triggers are deliberate. A squash-merge produces a commit that **no PR run ever tested**,
+because `main` can hold a combination neither branch had.
+
+### Seeing it work
+
+```bash
+gh run list --limit 5
+gh run view --log-failed          # just the failing step
+gh run download <run-id>          # the test reports
+```
+
+The published image:
+
+```bash
+docker pull ghcr.io/mr-sujay-patil/ecomdemo:latest
+docker pull ghcr.io/mr-sujay-patil/ecomdemo:<commit-sha>
+```
+
+Two tags, answering different questions. **The SHA tag is immutable** and identifies exactly one
+commit — it is what a deployment should reference and what a rollback needs. **`latest` is mutable**
+and always moves: convenient for a human, useless for anything repeatable, because two machines
+pulling it an hour apart can run different code.
+
+### The gate, demonstrated
+
+A throwaway PR containing one failing assertion produced:
+
+```
+Build and test .......... FAILURE
+Publish image to GHCR ... SKIPPED
+mergeStateStatus ........ BLOCKED
+
+$ gh pr merge 11 --squash
+X Pull request #11 is not mergeable: the base branch policy prohibits the merge.
+```
+
+That is the whole point of the phase: the check is not advisory.
+
+### Two traps worth knowing
+
+**A workflow runs from the PR's head branch, not from `main`.** The first attempt at the demo above
+branched from `main`, which did not yet have `ci.yml` — so *no checks ran at all*, and the PR was
+blocked for a different reason (a required check that never reported). A workflow only starts
+guarding pull requests once it is on the branch they come from.
+
+**GHCR rejects uppercase image names.** `ghcr.io/${{ github.repository }}` yields
+`ghcr.io/mr-sujay-patil/EcomDemo` and fails on every push; the workflow lower-cases it in its own
+step.
+
+### Dependabot
+
+Weekly PRs for Maven and for the actions themselves, with the Spring family grouped into one — they
+are released together and only make sense together. Each one goes through the same CI, so a bump that
+breaks a test arrives as a red pull request rather than as a surprise months later.
+
+### Known limits of Phase 11
+
+- **CI, not CD.** The image is published, not deployed anywhere. Deployment is Phases 25–26.
+- **No coverage or static analysis gate** — SonarQube is Phase 12; CI currently only asks "do the
+  tests pass".
+- **Actions are pinned to major tags** (`@v4`), which are mutable. Pinning to a commit SHA is
+  stricter; Dependabot is what keeps the tags honest in the meantime.
+- **The runner is `ubuntu-latest`**, also a moving target by design.
+- No caching of the Testcontainers PostgreSQL image, so each run pulls it.

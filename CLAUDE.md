@@ -368,6 +368,28 @@ the values would pass either way.
 **A new test should fail before it passes.** If you cannot make it go red by breaking the code it
 claims to cover, it is not testing that code.
 
+## CI
+
+**Every pull request runs `./mvnw -B clean verify` on GitHub Actions**, and `Build and test` is a
+required status check on `main` — a red build cannot merge, for anyone, including the repository
+owner. Test reports are uploaded as artifacts even when the build fails (`gh run download <id>`).
+
+**A merge to `main` publishes an image** to `ghcr.io/mr-sujay-patil/ecomdemo`, tagged with the commit
+SHA and `latest`. The publish job `needs: verify`, so an untested image cannot be published.
+
+**When editing `.github/workflows/ci.yml`:**
+
+- Keep permissions read-only at the workflow level and widen per job. Only `publish` gets
+  `packages: write`.
+- Keep both triggers. A squash-merge creates a commit no PR run tested.
+- The GHCR image name must be lower-cased — `${{ github.repository }}` contains an uppercase letter
+  and the registry rejects it.
+- A workflow only guards branches that contain it. A PR branched from before the workflow existed
+  runs no checks at all, which looks like a blocked PR for a completely different reason.
+
+**Dependency updates arrive as Dependabot PRs** (weekly, Spring grouped into one) and go through the
+same gate, so a breaking bump shows up as a red PR rather than a surprise.
+
 ## Git workflow
 
 **Branches.** `main` is always working and is protected — no direct pushes. Each phase gets
