@@ -24,7 +24,7 @@ later one.
 | Language | Java 21 (the build targets `release 21` regardless of the local JDK) |
 | Framework | Spring Boot 4.1.1 |
 | Build | Maven, via the committed wrapper — always `./mvnw`, never a system `mvn` |
-| Database | H2, in-memory (PostgreSQL arrives in Phase 4) |
+| Database | PostgreSQL 16+ when the app runs (`dev` profile); H2 in-memory when the tests run (`test` profile) |
 
 ## Build commands
 
@@ -48,8 +48,18 @@ Running a subset:
 The `*` before `#` is not optional: service tests group their cases in `@Nested` classes, and
 `-Dtest='CartServiceTest#addItem_*'` silently matches **zero** tests and still reports BUILD SUCCESS.
 
-While the app runs, the H2 console is at <http://localhost:8080/h2-console> — JDBC URL
-`jdbc:h2:mem:ecomdemo`, user `sa`, blank password.
+`spring-boot:run` needs a PostgreSQL on `localhost:5432` (database, user and password all
+`ecomdemo`, or override `POSTGRES_URL` / `POSTGRES_USER` / `POSTGRES_PASSWORD`); the README has the
+`docker run` line. **`./mvnw test` and `clean verify` need nothing installed** — they run on H2.
+
+The catalogue is no longer seeded on start. Against a persistent database, seed it once by hand:
+
+```bash
+docker exec -i ecomdemo-postgres psql -U ecomdemo -d ecomdemo < src/main/resources/data.sql
+```
+
+There is no H2 console any more — `spring-boot-h2console` was removed in Phase 4. Read the schema
+with `psql`, DBeaver or pgAdmin.
 
 Do not stop a running `spring-boot:run` by deleting `target/` — `clean` pulls the classes out from
 under the running JVM. Stop the process first.
@@ -72,8 +82,8 @@ A service test therefore mocks the collaborating *service* (`ProductService`, `C
 that service's repository.
 
 **The cart is a single shared row.** There are no users until Phase 8, so `Cart.SHARED_CART_ID = 1L`
-is seeded by `data.sql` and every cart endpoint operates on it. `requireCart()` recreates it if the
-row is missing.
+is the id every cart endpoint operates on. `data.sql` seeds it for the test profile; in `dev`
+nothing seeds it and `requireCart()` simply recreates the row when it is missing.
 
 **Cart totals are derived, order totals are stored.** `Cart.total()` recomputes from the live
 `Product` prices on every read — a cart must show today's price. `Order` stores `totalAmount`, and
@@ -94,16 +104,26 @@ tests keep that from silently regressing into an explicit save.
 **Time comes from an injected `Clock` bean** (`common/ClockConfiguration`), never `Instant.now()`, so
 a test can substitute `Clock.fixed(...)`.
 
-**Schema and data lifecycle.** Hibernate generates the schema from the `@Entity` classes
-(`ddl-auto: create-drop`) and `defer-datasource-initialization: true` makes `data.sql` run
-afterwards. The database is rebuilt and re-seeded on every start and nothing survives a restart —
-that is expected until Phase 4.
+**Configuration is split by profile.** `application.yml` holds only what every profile shares
+(`open-in-view: false`, SQL logging, `hibernate.jdbc.time_zone: UTC`, error handling) and names
+`dev` as the default, so `spring-boot:run` needs no flag. `application-dev.yml` holds the PostgreSQL
+datasource — credentials from `POSTGRES_*` environment variables with throwaway local defaults — and
+an explicitly written-out HikariCP pool. `application-test.yml` holds the H2 datasource. Anything
+database-specific belongs in a profile file, never in `application.yml`.
+
+**Schema and data lifecycle differ per profile.** Hibernate still generates the schema from the
+`@Entity` classes, but `dev` uses `ddl-auto: update` with `spring.sql.init.mode: never` — the
+database survives restarts, so re-running `data.sql` on every boot would add ten more products each
+time. `test` uses `ddl-auto: create-drop` with `defer-datasource-initialization: true` and
+`sql.init.mode: always`, giving every run a fresh schema and a freshly seeded catalogue. `update`
+cannot rename or drop a column and never reports what it did; Flyway replaces it in Phase 5.
 
 **Spring Boot 4 splits auto-configuration into per-technology modules.** Putting a library on the
-classpath no longer configures it: the H2 console needs `spring-boot-h2console`, and the test slices
-need `spring-boot-webmvc-test` / `spring-boot-data-jpa-test`. When a technology seems not to
-auto-configure, look for its missing module before assuming a config error. Adding such a module is
-not "a new technology" for the one-technology-per-phase rule.
+classpath no longer configures it: the test slices need `spring-boot-webmvc-test` /
+`spring-boot-data-jpa-test`, and the H2 console needed `spring-boot-h2console` before Phase 4
+dropped it. When a technology seems not to auto-configure, look for its missing module before
+assuming a config error. Adding such a module is not "a new technology" for the
+one-technology-per-phase rule.
 
 ## Code conventions
 
@@ -151,10 +171,12 @@ recording a trade-off or a non-obvious constraint.
 
 **Naming:** `methodName_condition_expectedResult`. A failure report should read as a sentence.
 
-**Structure:** one `@Nested` class per method under test (service tests only — controller,
-repository and flow tests stay flat), then explicit `// GIVEN`, `// WHEN`, `// THEN` comments.
-**AssertJ** for every assertion, including controller tests. Compare money with `isEqualByComparingTo`, never `isEqualTo` —
-`BigDecimal.equals` compares scale too.
+**Structure:** one `@Nested` class per method under test — or per profile in
+`DatasourceProfileTest` — then explicit `// GIVEN`, `// WHEN`, `// THEN` comments. Controller,
+repository and flow tests stay flat.
+
+**AssertJ** for every assertion, including controller tests. Compare money with
+`isEqualByComparingTo`, never `isEqualTo` — `BigDecimal.equals` compares scale too.
 
 **Pick the cheapest level that can catch the bug:**
 
@@ -164,6 +186,17 @@ repository and flow tests stay flat), then explicit `// GIVEN`, `// WHEN`, `// T
 | Web slice | `@WebMvcTest(XController.class)` | controller, Jackson, validation, error advice | status codes, JSON shape, headers, exception → status mapping |
 | JPA slice | `@DataJpaTest` | Hibernate, repositories, embedded H2 | hand-written `@Query` only — never Spring Data's generated methods |
 | Integration | `@SpringBootTest` | everything, real port | keep it to one flow test; the pyramid's apex stays small |
+| Configuration | `ApplicationContextRunner` | one auto-configuration, no server | what the `application-*.yml` files actually bind to (`DatasourceProfileTest`) |
+
+**Anything that builds a datasource must declare `@ActiveProfiles("test")`** — `@DataJpaTest`,
+`@SpringBootTest`, and any new slice that touches the database. Without it the test inherits the
+default `dev` profile and dials PostgreSQL, so the build fails on every machine with no database
+running. `@WebMvcTest` creates no datasource and needs no profile.
+
+**Configuration is testable too.** A typo in a `${PLACEHOLDER}` becomes a literal string and a pool
+setting in the wrong profile only shows up under load. `DatasourceProfileTest` binds the real YAML
+with `ConfigDataApplicationContextInitializer` and asserts what the container ends up with — no
+database is contacted, because HikariCP opens no connection until one is asked for.
 
 **Spring Boot 4 specifics.** `@WebMvcTest` and `@DataJpaTest` come from the separate
 `spring-boot-webmvc-test` and `spring-boot-data-jpa-test` modules. `@MockBean` is removed — use
