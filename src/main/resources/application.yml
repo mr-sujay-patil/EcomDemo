@@ -1,0 +1,38 @@
+spring:
+  application:
+    name: ecomdemo
+
+  # In-memory H2. DB_CLOSE_DELAY=-1 keeps the database alive for the whole JVM lifetime
+  # rather than dropping it when the last connection closes.
+  datasource:
+    url: jdbc:h2:mem:ecomdemo;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop        # Hibernate generates the schema from the @Entity classes
+    defer-datasource-initialization: true   # ...so data.sql must run AFTER that, not before
+    open-in-view: false            # no lazy loading during JSON serialisation - map to DTOs in the service
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+  sql:
+    init:
+      mode: always                 # always execute data.sql, including for embedded databases
+
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+server:
+  error:
+    include-stacktrace: never
+
+logging:
+  level:
+    org.hibernate.orm.jdbc.bind: trace   # shows the values bound to '?' placeholders in the SQL above
