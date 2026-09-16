@@ -298,6 +298,9 @@ ten products on every boot. Seed it once:
 docker exec -i ecomdemo-postgres psql -U ecomdemo -d ecomdemo < src/main/resources/data.sql
 ```
 
+> ***Superseded in Phase 5.*** Flyway now creates the tables and seeds the catalogue itself, exactly
+> once per database. There is no `data.sql` any more and no manual seeding step — just start the app.
+
 ### Try it — prove the data survives
 
 ```bash
@@ -376,4 +379,145 @@ logic, not about PostgreSQL compatibility.
 - Tests do not run against PostgreSQL (Phase 7).
 - The local password is in `application-dev.yml`. That is deliberate — it opens a throwaway local
   database and nothing else — but a real deployment sets the environment variables instead.
+- Two concurrent orders for the last unit in stock can still both succeed (Phase 6).
+
+---
+
+## Phase 5 — Database Migrations
+
+**Added:** Flyway. The schema stops being a side effect of the Java code and becomes a set of
+versioned files that are reviewed, committed and applied in order — like the rest of the codebase.
+
+- **`V1__init_schema.sql`** — the five tables, taken from a `pg_dump` of the Phase 4 database so it
+  reproduces what Hibernate had been generating, plus two things Hibernate would not do: **named
+  constraints** (`fk_cart_items_product`, not `fk1re40cjegsfvw58xrkdp6bac6`) and **indexes on the
+  foreign key columns**. PostgreSQL indexes the referenced side of a foreign key automatically but
+  never the referencing side, so the `join fetch` queries were scanning whole tables.
+- **`V2__seed_products.sql`** — replaces `data.sql`, which is deleted. As a migration the catalogue
+  is inserted exactly once per database, recorded, and never again.
+- **`V3__add_product_category.sql`** — a realistic later change: a nullable `category` column and an
+  index on it, mapped onto `Product` and exposed through the product API.
+- **`ddl-auto: validate`** — Hibernate no longer touches the schema. It compares the entities against
+  what Flyway built and refuses to start if they disagree.
+
+### How it fits together
+
+```
+start
+  └─ Flyway runs first ──> applies any migration not yet in flyway_schema_history
+       └─ Hibernate ─────> validate: do the @Entity classes match these tables?
+            └─ app ──────> serves traffic, or fails to start. Never a half-migrated database.
+```
+
+### Run it
+
+```bash
+./mvnw spring-boot:run
+```
+
+That is the whole setup now. Against an empty database Flyway creates the schema and seeds it; there
+is no manual seeding step any more.
+
+Starting from scratch — drop the schema and let Flyway rebuild it:
+
+```bash
+docker exec ecomdemo-postgres psql -U ecomdemo -d ecomdemo \
+  -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+./mvnw spring-boot:run
+```
+
+```
+Migrating schema "public" to version "1 - init schema"
+Migrating schema "public" to version "2 - seed products"
+Migrating schema "public" to version "3 - add product category"
+Successfully applied 3 migrations to schema "public", now at version v3
+```
+
+Start it a second time and Flyway says `Schema "public" is up to date. No migration necessary.`
+
+### Try it
+
+**See what Flyway recorded:**
+
+```bash
+docker exec ecomdemo-postgres psql -U ecomdemo -d ecomdemo \
+  -c "select installed_rank, version, description, checksum, success from flyway_schema_history order by installed_rank;"
+```
+
+```
+ installed_rank | version |     description      |  checksum  | success
+----------------+---------+----------------------+------------+---------
+              1 | 1       | init schema          | 1757385095 | t
+              2 | 2       | seed products        |  856564194 | t
+              3 | 3       | add product category | 1468050282 | t
+```
+
+**Use the column V3 added** — and note that a client that has never heard of `category` still works
+unchanged, which is what "backward compatible" means in practice:
+
+```bash
+curl -s -XPOST localhost:8080/api/products -H 'Content-Type: application/json' \
+     -d '{"name":"Standing Desk","description":"Electric, dual motor","price":549.00,"stockQuantity":12,"category":"Furniture"}' | jq
+# {"id":11, ..., "category":"Furniture"}
+
+curl -s -XPOST localhost:8080/api/products -H 'Content-Type: application/json' \
+     -d '{"name":"Mouse Pad","description":"Cloth, XL","price":19.99,"stockQuantity":100}' | jq
+# {"id":12, ..., "category":null}      <- the old payload, still accepted
+```
+
+**Watch a checksum catch you** — the reason you never edit an applied migration:
+
+```bash
+echo "-- an innocent-looking comment" >> src/main/resources/db/migration/V1__init_schema.sql
+./mvnw spring-boot:run
+```
+
+```
+Validate failed: Migrations have failed validation
+Migration checksum mismatch for migration version 1
+-> Applied to database : 1757385095
+-> Resolved locally    : 919311040
+Either revert the changes to the migration, or run repair to update the schema history.
+```
+
+The application refuses to start. Undo the edit and it starts again. A comment was enough — Flyway
+compares the file's checksum, not its meaning, precisely because it cannot know whether your edit was
+cosmetic or changed a column type.
+
+### Adding a migration
+
+```bash
+# 1. next number, double underscore, snake_case description
+vim src/main/resources/db/migration/V4__add_product_sku.sql
+
+# 2. it applies on the next start
+./mvnw spring-boot:run
+```
+
+Rules that are not negotiable:
+
+1. **Never edit an applied migration.** Write a new one. The checksum above is why.
+2. **Never renumber.** Version order is the order of application, permanently.
+3. **Prefer backward-compatible changes** — add nullable columns, do not rename in place. During a
+   deploy the old and new versions of the application both run against this one database.
+
+### Tests
+
+```bash
+./mvnw clean verify        # 82 tests
+```
+
+The suite now runs the **same migrations** against H2, so a broken migration fails the build rather
+than a deployment. `FlywayMigrationTest` asserts the history table, the tables and indexes V1
+creates, V3's column being nullable, and V2's seed data.
+
+### Known limits of Phase 5
+
+- The migrations are written in SQL that both PostgreSQL and H2 accept, and the tests exercise them
+  on H2. Anything PostgreSQL-specific would pass the build and fail on startup. Phase 7
+  (Testcontainers) is the fix.
+- Nothing rolls a migration back. Flyway Community has no `undo`; the recovery path is a new
+  migration that reverses the change.
+- `V2__seed_products.sql` means reference data is deployed with the schema. Fine for a demo
+  catalogue; real reference data usually wants repeatable migrations (`R__*.sql`) instead.
 - Two concurrent orders for the last unit in stock can still both succeed (Phase 6).

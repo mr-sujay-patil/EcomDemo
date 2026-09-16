@@ -241,3 +241,73 @@ with the old data stranded in it. Phase 5 replaces it with Flyway.
 - The `docker run` command is a copy-paste convenience, not an understanding of Docker (Phase 10).
 - Nothing checks the database is reachable before the application accepts traffic; a health endpoint
   arrives with Actuator in Phase 15.
+
+---
+
+## Phase 5 — Database Migrations
+
+**Flyway 12.4.0, version curated by the Spring Boot parent.** Three dependencies rather than one:
+`flyway-core`, `flyway-database-postgresql` (Flyway 10 split the heavyweight database
+implementations out of core) and `spring-boot-flyway`. That last one is Spring Boot's
+auto-configuration module, and leaving it out is a genuinely nasty failure: Flyway sits on the
+classpath and simply never runs — no error, no log line — and Hibernate then fails with
+`Schema validation: missing table [cart_items]`, which points nowhere near the cause. It is the same
+per-technology module split as `spring-boot-h2console` in Phase 0 and the test slices in Phase 2.
+
+**No `flyway-database-h2`.** The obvious inference from the PostgreSQL split is that every database
+needs a module; the artifact does not exist. Checked by looking inside the jar: `flyway-core` still
+carries `org.flywaydb.core.internal.database.h2`, so the test suite needs no third dependency.
+
+**V1 reproduces the Hibernate-generated schema, from a dump rather than from memory.** `ddl-auto`
+moved straight from `update` to `validate`, so V1 had to match what was already there closely enough
+for Hibernate to agree — a `pg_dump --schema-only` of the Phase 4 database was the source. Two
+deliberate improvements went in at the same time, both things Hibernate will not do for you: named
+constraints, and indexes on the four foreign key columns. PostgreSQL indexes the referenced side of a
+foreign key automatically but never the referencing side, so every `left join fetch` in
+`CartRepository` and `OrderRepository` had been scanning the whole child table.
+
+**The existing database was dropped rather than baselined.** It had been built by Hibernate and had
+no `flyway_schema_history`, so Flyway refuses to touch it. `baseline-on-migrate` would have stamped
+whatever Hibernate happened to create as "version 1" without ever running V1, leaving the schema
+unversioned in practice and the V2 seed duplicating ten products that were already there. Dropping
+cost nothing but demo data and is what the phase's "Done when" actually asks for. On a database with
+real data in it the answer would be the opposite, and `baseline-on-migrate` is the tool for it.
+
+**The test suite runs the real migrations.** The alternative — leaving tests on `create-drop` and
+`data.sql` — would mean the migrations are never executed until someone starts the application, which
+defeats the point of putting the schema under version control. Two adjustments made it work:
+`spring.test.database.replace: none`, so `@DataJpaTest` keeps the configured `MODE=PostgreSQL`
+datasource instead of swapping in a plain embedded one whose dialect rules the migrations are not
+written for; and `ddl-auto: validate` in the test profile too, so the entities are checked against
+the migrated schema on every build. The honest limit: this proves the migrations run on **H2**.
+Anything PostgreSQL-specific would pass `verify` and fail on startup. Phase 7 closes that.
+
+**`FlywayMigrationTest` queries `information_schema` directly.** Unusual for this codebase, and
+deliberate: the subject under test is the migration mechanism, not any Java code — every assertion
+would still hold if the entities were deleted. Seed data is asserted by name rather than by counting
+rows, because the test profile's H2 lives for the whole JVM and a count would make the result depend
+on which tests happened to run first. That shared-database-per-run behaviour is a mild regression in
+isolation compared with `create-drop`, accepted because `@DataJpaTest` still rolls back and the
+alternative is not running the migrations at all.
+
+**V3 is nullable on purpose, and that is the whole lesson.** A nullable column with no default
+rewrites no rows, takes no long lock, and leaves code that has never heard of `category` working —
+which is exactly the situation during a rolling deploy, where two versions of the application talk to
+one database for a few minutes. `NOT NULL` would have needed a value for every existing row and would
+have broken the running old version instantly. That tightening belongs in a later migration once
+every row has a value, and never on the same deploy: expand first, contract later.
+
+**`category` is a `String`, not an enum, and is set through a setter rather than the constructor.**
+An enum would turn every new category into a code change and a redeploy, and there is no fixed set to
+enforce yet. Keeping it out of the constructor means no existing call site had to be changed to pass
+`null`.
+
+### Known gaps, deferred on purpose
+
+- Migrations are verified on H2, not PostgreSQL (Phase 7, Testcontainers).
+- Flyway Community has no `undo`; reversing a change means writing another migration.
+- `V2` deploys reference data as a versioned migration. Repeatable migrations (`R__*.sql`) are the
+  better home for data that should track the file rather than be applied once — not needed yet.
+- Nothing runs migrations separately from application startup. Real deployments usually migrate as a
+  distinct step, so a schema change cannot be half-applied by three instances booting at once. That
+  needs somewhere to run it from, which arrives with CI in Phase 11.

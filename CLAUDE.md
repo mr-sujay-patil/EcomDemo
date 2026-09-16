@@ -25,6 +25,7 @@ later one.
 | Framework | Spring Boot 4.1.1 |
 | Build | Maven, via the committed wrapper — always `./mvnw`, never a system `mvn` |
 | Database | PostgreSQL 16+ when the app runs (`dev` profile); H2 in-memory when the tests run (`test` profile) |
+| Schema | Owned by Flyway (`src/main/resources/db/migration`). Hibernate only validates |
 
 ## Build commands
 
@@ -124,6 +125,34 @@ classpath no longer configures it: the test slices need `spring-boot-webmvc-test
 dropped it. When a technology seems not to auto-configure, look for its missing module before
 assuming a config error. Adding such a module is not "a new technology" for the
 one-technology-per-phase rule.
+
+## Database migrations
+
+**Flyway owns the schema; Hibernate only checks it.** `ddl-auto` is `validate` in every profile. A
+mapping added without a matching migration fails at startup — loudly, and before the first query
+rather than during it.
+
+**Migrations live in `src/main/resources/db/migration`**, named `V<n>__snake_case_description.sql`.
+The version number is the order of application, permanently.
+
+**Three rules that are not negotiable:**
+
+1. **Never edit an applied migration.** Flyway stores a checksum of every file it has run and
+   compares it on each start; a changed file — a comment is enough — stops the application with
+   `Migration checksum mismatch`. Fix forward with a new migration instead.
+2. **Never renumber or reuse a version.**
+3. **Prefer backward-compatible changes.** Add nullable columns rather than renaming in place. During
+   a rolling deploy the old and new versions of the application share one database, so a migration
+   must leave the code that has not been deployed yet working. Tighten later, in a separate migration
+   (expand, then contract) — never on the same deploy.
+
+**Name your constraints and index your foreign keys.** Both are things Hibernate's generated DDL
+would not do: `fk_cart_items_product` is a name you can act on when it appears in an error, and
+PostgreSQL never indexes the referencing side of a foreign key on its own.
+
+**The test suite runs the same migrations** against H2 in `MODE=PostgreSQL`, so a broken migration
+fails `./mvnw clean verify`. That also means migration SQL must be portable — anything
+PostgreSQL-specific passes the build and fails on startup, until Testcontainers arrives in Phase 7.
 
 ## Code conventions
 
