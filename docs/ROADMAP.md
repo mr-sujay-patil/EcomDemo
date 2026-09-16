@@ -51,7 +51,7 @@ flowchart LR
 | 2 | Automated testing (JUnit 5, Mockito, MockMvc) | Foundation | ✅ Complete |
 | 3 | API documentation (OpenAPI / Swagger) | Foundation | ⬜ |
 | 4 | PostgreSQL | Data | ✅ Complete |
-| 5 | Flyway migrations | Data | ⬜ |
+| 5 | Flyway migrations | Data | ✅ Complete |
 | 6 | Transactions & concurrency | Data | ⬜ |
 | 7 | Testcontainers | Data | ⬜ |
 | 8 | Spring Security (users & roles) | Security | ⬜ |

@@ -45,7 +45,7 @@ class ProductControllerTest {
     private ProductService productService;
 
     private static ProductResponse keyboard() {
-        return new ProductResponse(1L, "Mechanical Keyboard", "Hot-swappable", new BigDecimal("129.99"), 40);
+        return new ProductResponse(1L, "Mechanical Keyboard", "Hot-swappable", new BigDecimal("129.99"), 40, "Peripherals");
     }
 
     @Test

@@ -50,6 +50,7 @@ public class ProductService {
                 request.description(),
                 normalise(request.price()),
                 request.stockQuantity());
+        product.setCategory(request.category());
         return ProductResponse.from(productRepository.save(product));
     }
 
@@ -60,6 +61,7 @@ public class ProductService {
         product.setDescription(request.description());
         product.setPrice(normalise(request.price()));
         product.setStockQuantity(request.stockQuantity());
+        product.setCategory(request.category());
         // No save() call needed: the entity is managed inside this transaction, so Hibernate
         // flushes the changes automatically at commit. This is "dirty checking".
         return ProductResponse.from(product);

@@ -13,9 +13,14 @@ spring:
 
   jpa:
     hibernate:
-      ddl-auto: create-drop        # a fresh schema per run: tests must never depend on leftover state
-    defer-datasource-initialization: true   # ...so data.sql runs AFTER that, not before
+      # The same validate as dev, against a schema the same migrations built. The test suite now
+      # proves the migrations run and that the entities match what they produce - a broken migration
+      # fails `./mvnw clean verify` instead of a deployment.
+      ddl-auto: validate
 
-  sql:
-    init:
-      mode: always                 # seed the catalogue for every test run
+  # @DataJpaTest would otherwise swap this datasource for a plain embedded one, whose URL carries no
+  # MODE=PostgreSQL - and the migrations would then run against different SQL dialect rules than the
+  # ones they are written for. Keeping the configured datasource keeps every test on one engine.
+  test:
+    database:
+      replace: none

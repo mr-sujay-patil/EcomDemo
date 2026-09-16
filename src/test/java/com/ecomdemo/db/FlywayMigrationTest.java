@@ -1,0 +1,152 @@
+package com.ecomdemo.db;
+
+import java.util.List;
+
+import jakarta.persistence.EntityManager;
+
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
+import org.springframework.test.context.ActiveProfiles;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * Asserts that Flyway - not Hibernate - built the schema the tests run against.
+ *
+ * <p>Reaching for native queries against {@code flyway_schema_history} and {@code information_schema}
+ * is unusual, and deliberate: the thing under test here is the migration mechanism itself, not any
+ * Java code. Everything below would still pass if the entities were deleted.
+ *
+ * <p>That the context starts at all is itself the headline assertion. {@code ddl-auto: validate}
+ * means Hibernate compares every {@code @Entity} against the tables Flyway created and refuses to
+ * build the {@code EntityManagerFactory} if they disagree - so a migration that forgets a column
+ * fails every test in this class before a single assertion runs.
+ */
+@DataJpaTest
+@ActiveProfiles("test")
+class FlywayMigrationTest {
+
+    @Autowired
+    private EntityManager entityManager;
+
+    @SuppressWarnings("unchecked")
+    private List<Object> nativeQuery(String sql) {
+        return entityManager.createNativeQuery(sql).getResultList();
+    }
+
+    @Nested
+    class SchemaHistory {
+
+        @Test
+        void flywaySchemaHistory_afterStartup_recordsEveryMigrationInOrder() {
+            // GIVEN a database Flyway has migrated
+            // WHEN the history table is read
+            List<Object> versions = nativeQuery(
+                    "select version from flyway_schema_history where version is not null order by installed_rank");
+
+            // THEN every migration in db/migration is recorded, in the order it was applied
+            assertThat(versions).containsExactly("1", "2", "3");
+        }
+
+        @Test
+        void flywaySchemaHistory_afterStartup_marksEveryMigrationSuccessful() {
+            // GIVEN a database Flyway has migrated
+            // WHEN the success flags are read
+            List<Object> failures = nativeQuery(
+                    "select version from flyway_schema_history where success = false");
+
+            // THEN nothing was left half-applied
+            assertThat(failures).isEmpty();
+        }
+
+        @Test
+        void flywaySchemaHistory_afterStartup_storesAChecksumForEachVersionedMigration() {
+            // GIVEN a database Flyway has migrated
+            // WHEN the checksums are read
+            List<Object> checksums = nativeQuery(
+                    "select checksum from flyway_schema_history where version is not null");
+
+            // THEN each one has the checksum Flyway compares on every later start. This is what makes
+            // editing an applied migration a startup failure rather than a silent divergence.
+            assertThat(checksums).hasSize(3).doesNotContainNull();
+        }
+    }
+
+    @Nested
+    class SchemaContents {
+
+        @Test
+        void v1_always_createsEveryTableTheEntitiesNeed() {
+            // GIVEN the schema V1 built
+            // WHEN the table names are read
+            List<Object> tables = nativeQuery(
+                    "select lower(table_name) from information_schema.tables "
+                            + "where table_schema = 'public' and table_name not like 'flyway%'");
+
+            // THEN all five are there
+            assertThat(tables).containsExactlyInAnyOrder(
+                    "products", "carts", "cart_items", "orders", "order_items");
+        }
+
+        @Test
+        void v1_always_indexesEveryForeignKeyColumn() {
+            // GIVEN the schema V1 built
+            // WHEN the index names are read
+            List<Object> indexes = nativeQuery(
+                    "select lower(index_name) from information_schema.indexes "
+                            + "where table_schema = 'public'");
+
+            // THEN the four foreign key columns are covered. PostgreSQL indexes the referenced side of
+            // a foreign key automatically but never the referencing side, so without these every join
+            // fetch in CartRepository and OrderRepository scans the whole table.
+            assertThat(indexes).contains(
+                    "idx_cart_items_cart", "idx_cart_items_product",
+                    "idx_order_items_order", "idx_order_items_product");
+        }
+
+        @Test
+        void v3_always_addsTheCategoryColumnAsNullable() {
+            // GIVEN the column V3 added
+            // WHEN its definition is read
+            List<Object> nullable = nativeQuery(
+                    "select is_nullable from information_schema.columns "
+                            + "where lower(table_name) = 'products' and lower(column_name) = 'category'");
+
+            // THEN it exists and accepts NULL - the property that let the migration ship ahead of the
+            // code, and that keeps the rows V2 seeded valid without rewriting any of them.
+            assertThat(nullable).containsExactly("YES");
+        }
+    }
+
+    @Nested
+    class SeedData {
+
+        @Test
+        void v2_always_seedsTheCatalogue() {
+            // GIVEN the seed migration
+            // WHEN the catalogue is read
+            List<Object> names = nativeQuery("select name from products");
+
+            // THEN the products it inserts are present. Asserted by name rather than by counting rows:
+            // the test profile's H2 lives for the whole JVM, so another test may have added products
+            // by the time this one runs, and a count would make this test depend on execution order.
+            assertThat(names).contains(
+                    "Mechanical Keyboard", "Wireless Mouse", "27\" 4K Monitor", "USB-C Hub",
+                    "Noise-Cancelling Headphones", "Laptop Stand", "1080p Webcam",
+                    "Desk Microphone", "1TB Portable SSD", "Cable Management Kit");
+        }
+
+        @Test
+        void v2_always_seedsTheSharedCartRow() {
+            // GIVEN the seed migration
+            // WHEN the cart table is read
+            List<Object> ids = nativeQuery("select id from carts");
+
+            // THEN the single shared cart exists, so the first request never has to create it
+            assertThat(ids).isNotEmpty();
+        }
+    }
+}

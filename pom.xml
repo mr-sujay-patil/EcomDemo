@@ -68,6 +68,41 @@
             <scope>test</scope>
         </dependency>
 
+        <!--
+            Flyway owns the database schema from Phase 5 on: it creates it, versions it and records
+            every change in flyway_schema_history. Hibernate is demoted to validating that the
+            entities still match what Flyway built.
+
+            Flyway 10 split the heavyweight database implementations out of flyway-core, so
+            PostgreSQL needs its own module - without it Flyway starts and then fails to recognise
+            the database. H2 is not in that split: flyway-core still carries it, which is why the
+            test suite needs no third dependency. Versions come from the parent POM (Flyway 12.4.0
+            under Spring Boot 4.1.1).
+        -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
+
+        <!--
+            Spring Boot's Flyway auto-configuration, which runs the migrations before Hibernate
+            builds the EntityManagerFactory and binds the spring.flyway.* properties.
+
+            It is a separate module for the same reason spring-boot-h2console was in Phase 0: Boot 4
+            split the auto-configurations out of spring-boot-autoconfigure per technology. Without
+            it Flyway sits on the classpath and simply never runs - no error, no log line, just an
+            empty database and a `Schema validation: missing table` failure from Hibernate that
+            points nowhere near the actual cause.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-flyway</artifactId>
+        </dependency>
+
         <!-- JUnit 5, AssertJ, @SpringBootTest and TestRestTemplate. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
