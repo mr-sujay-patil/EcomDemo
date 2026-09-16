@@ -46,6 +46,16 @@
         </dependency>
 
         <!--
+            Spring Security: the filter chain, BCrypt, HTTP Basic and method security. Adding it to
+            the classpath secures every endpoint by default - which is the right default, and the
+            reason SecurityConfiguration has to say explicitly which endpoints are public.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+
+        <!--
             The PostgreSQL JDBC driver, and from this phase on the only database the application
             itself talks to. Runtime scope: no application code imports a driver class - Hibernate
             and HikariCP load it by name from the JDBC URL. The version comes from the parent POM.
@@ -142,6 +152,16 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+            @WithMockUser and the httpBasic() request post-processor. Without this, testing an
+            authorization rule would mean authenticating for real in every test.
+        -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
             <scope>test</scope>
         </dependency>
 
