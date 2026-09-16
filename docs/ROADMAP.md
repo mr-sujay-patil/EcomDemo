@@ -48,7 +48,7 @@ flowchart LR
 |---|---|---|---|
 | 0 | Baseline monolith (Spring Boot + H2) | Foundation | ✅ Complete |
 | 1 | Git & GitHub workflow | Foundation | ✅ Complete |
-| 2 | Automated testing (JUnit 5, Mockito, MockMvc) | Foundation | ⬜ |
+| 2 | Automated testing (JUnit 5, Mockito, MockMvc) | Foundation | ✅ Complete |
 | 3 | API documentation (OpenAPI / Swagger) | Foundation | ⬜ |
 | 4 | PostgreSQL | Data | ⬜ |
 | 5 | Flyway migrations | Data | ⬜ |
