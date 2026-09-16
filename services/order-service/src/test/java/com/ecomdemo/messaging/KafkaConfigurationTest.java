@@ -27,18 +27,20 @@ import org.springframework.kafka.support.serializer.JacksonJsonDeserializer;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * What the Kafka configuration actually binds to, and what the broker in compose is actually told.
+ * What order-service's Kafka producer binds to, and what the broker in compose is told.
  *
  * <p>The same reasoning as {@code DatasourceProfileTest}: these settings are strings in a YAML file
  * until something reads them, and every mistake available here is silent. {@code acks=1} instead of
- * {@code all} loses data only when a broker fails. A missing {@code ErrorHandlingDeserializer}
- * presents as a consumer that has stopped, not as an error. A replication factor of 3 on one broker
- * produces a consumer group that hangs. None of them fails a build, and none of them fails
+ * {@code all} loses data only when a broker fails. A replication factor of 3 on one broker produces
+ * a consumer group that hangs. None of them fails a build, and none of them fails
  * {@code docker compose up}.
  *
- * <p>No broker is contacted. The producer and consumer factories hold their configuration and open
- * no connection until something asks them to send or poll, exactly as HikariCP opens no connection
- * until a query needs one.
+ * <p>The consumer half of this class moved to notification-service in Phase 20, along with the
+ * consumer itself. This service only produces now, which is the shape of the split: it publishes a
+ * fact and never learns who read it.
+ *
+ * <p>No broker is contacted. The producer factory holds its configuration and opens no connection
+ * until something asks it to send, exactly as HikariCP opens no connection until a query needs one.
  */
 class KafkaConfigurationTest {
 
@@ -51,7 +53,24 @@ class KafkaConfigurationTest {
 
     @BeforeAll
     static void readCompose() throws IOException {
-        compose = new Yaml().load(Files.readString(Path.of("compose.yaml")));
+        compose = new Yaml().load(Files.readString(repositoryRoot().resolve("compose.yaml")));
+    }
+
+    /**
+     * Walks up from the module directory to the repository root.
+     *
+     * <p>Maven runs this from the module, and compose.yaml belongs to no module. Hard-coding
+     * {@code ../../} would work until somebody moved the module.
+     */
+    private static Path repositoryRoot() {
+        Path candidate = Path.of("").toAbsolutePath();
+        while (candidate != null && !Files.exists(candidate.resolve("compose.yaml"))) {
+            candidate = candidate.getParent();
+        }
+        if (candidate == null) {
+            throw new IllegalStateException("Could not find the repository root");
+        }
+        return candidate;
     }
 
     @SuppressWarnings("unchecked")
@@ -106,112 +125,6 @@ class KafkaConfigurationTest {
                 // outage freezes every purchase for a minute before the event fails.
                 assertThat(props).containsEntry("max.block.ms", "5000");
             });
-        }
-    }
-
-    @Nested
-    class TheConsumer {
-
-        @Test
-        void consumer_always_wrapsItsDeserializersInErrorHandlingDeserializer() {
-            runner.run(context -> {
-                Map<String, Object> props = context.getBean(KafkaProperties.class)
-                        .buildConsumerProperties();
-
-                // THEN a malformed message fails the record, not the poll.
-                //
-                // This is the most important assertion in this class. Without the wrapper, a poison
-                // message throws inside poll(), the container asks for the same batch again, and the
-                // partition stops advancing forever - no retry, no dead letter, no error, just a
-                // consumer that appears healthy and has silently stopped.
-                // The two deserializer keys bind as Class, the two delegate keys as String -
-                // Boot resolves the former through its own property binding and passes the latter
-                // straight through to the Kafka client, which resolves them itself.
-                assertThat(props)
-                        .containsEntry(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG,
-                                ErrorHandlingDeserializer.class)
-                        .containsEntry(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG,
-                                ErrorHandlingDeserializer.class)
-                        .containsEntry(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS,
-                                DelegatingByTopicDeserializer.class.getName());
-            });
-        }
-
-        @Test
-        void consumer_always_readsTheDeadLetterTopicAsRawBytes() {
-            runner.run(context -> {
-                Map<String, Object> props = context.getBean(KafkaProperties.class)
-                        .buildConsumerProperties();
-
-                // THEN the DLT gets ByteArrayDeserializer and everything else gets Jackson.
-                //
-                // A record is in the dead-letter topic precisely because it could not be turned into
-                // an OrderPlacedEvent. Pointing that consumer at a JSON deserializer means it fails
-                // on exactly the payload it exists to report: @DltHandler never runs and nothing is
-                // logged. ByteArrayDeserializer cannot fail.
-                assertThat(props.get(DelegatingByTopicSerialization.VALUE_SERIALIZATION_TOPIC_CONFIG))
-                        .asString()
-                        .isEqualTo("orders\\.placed-dlt:" + ByteArrayDeserializer.class.getName());
-
-                // Everything else goes through the default rather than through a second pattern.
-                // Patterns are matched in a map's iteration order, not the order they are written
-                // in, so a ".+" entry would not be a fallback - it would also match the DLT and win
-                // roughly half the time. That is how this was found: the integration test passed
-                // while the same configuration in a container sent the DLT through Jackson.
-                assertThat(props)
-                        .containsEntry(DelegatingByTopicSerialization.VALUE_SERIALIZATION_TOPIC_DEFAULT,
-                                JacksonJsonDeserializer.class.getName());
-            });
-        }
-
-        @Test
-        void consumer_always_trustsOnlyTheEventPackage() {
-            runner.run(context -> {
-                Map<String, Object> props = context.getBean(KafkaProperties.class)
-                        .buildConsumerProperties();
-
-                // THEN the JSON deserializer will construct types from one package only. Trusting
-                // "*" lets whoever can write to the topic name any class on the classpath.
-                assertThat(props).containsEntry(JacksonJsonDeserializer.TRUSTED_PACKAGES,
-                        "com.ecomdemo.order.event");
-            });
-        }
-
-        @Test
-        void consumer_always_commitsOffsetsItself() {
-            runner.run(context -> {
-                Map<String, Object> props = context.getBean(KafkaProperties.class)
-                        .buildConsumerProperties();
-
-                // THEN auto-commit is off, so the offset moves after the listener returns rather
-                // than on a timer. Auto-commit acknowledges records that were received, not records
-                // that were handled - which turns at-least-once into at-most-once, silently.
-                assertThat(props)
-                        .containsEntry(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false)
-                        .containsEntry(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
-                        .containsEntry(ConsumerConfig.GROUP_ID_CONFIG, "ecomdemo-notifications");
-            });
-        }
-    }
-
-    @Nested
-    class TheTestProfileNeedsNoBroker {
-
-        @Test
-        void testProfile_always_leavesTheListenerContainersStopped() {
-            // GIVEN the profile the fast suite runs under
-            new ApplicationContextRunner()
-                    .withInitializer(new ConfigDataApplicationContextInitializer())
-                    .withConfiguration(AutoConfigurations.of(KafkaAutoConfiguration.class))
-                    .withPropertyValues("spring.profiles.active=test")
-                    .run(context -> {
-                        KafkaProperties properties = context.getBean(KafkaProperties.class);
-
-                        // THEN nothing polls and nothing creates topics, so `./mvnw test` needs no
-                        // Docker - the rule Phase 7 established and this phase must not break.
-                        assertThat(properties.getListener().isAutoStartup()).isFalse();
-                        assertThat(properties.getAdmin().isAutoCreate()).isFalse();
-                    });
         }
     }
 
@@ -279,14 +192,27 @@ class KafkaConfigurationTest {
 
         @Test
         @SuppressWarnings("unchecked")
-        void kafka_always_isReachedByServiceNameAndWaitedForByTheApp() {
-            // GIVEN the app service
-            Map<String, Object> dependsOn = (Map<String, Object>) service("app").get("depends_on");
+        void kafka_always_isReachedByServiceNameAndWaitedForByBothServicesThatUseIt() {
+            // GIVEN the two services that speak to the broker - and only those two. catalog,
+            // inventory and customer have no Kafka dependency at all, which is itself worth pinning:
+            // a service that waits for a broker it never uses is a service that cannot start while
+            // the broker is down, for no reason.
+            for (String kafkaUser : List.of("order-service", "notification-service")) {
+                Map<String, Object> dependsOn = (Map<String, Object>) service(kafkaUser).get("depends_on");
 
-            // THEN it waits for a broker that is answering, not merely started
-            assertThat((Map<String, Object>) dependsOn.get("kafka"))
-                    .containsEntry("condition", "service_healthy");
-            assertThat(environment("app")).containsEntry("SPRING_KAFKA_BOOTSTRAP_SERVERS", "kafka:9092");
+                // THEN it waits for a broker that is answering, not merely started
+                assertThat((Map<String, Object>) dependsOn.get("kafka"))
+                        .as("%s must wait for the broker", kafkaUser)
+                        .containsEntry("condition", "service_healthy");
+                assertThat(environment(kafkaUser))
+                        .containsEntry("SPRING_KAFKA_BOOTSTRAP_SERVERS", "kafka:9092");
+            }
+
+            for (String other : List.of("customer-service", "catalog-service", "inventory-service")) {
+                assertThat(environment(other))
+                        .as("%s does not use Kafka and must not be configured for it", other)
+                        .doesNotContainKey("SPRING_KAFKA_BOOTSTRAP_SERVERS");
+            }
         }
 
         @Test
@@ -300,15 +226,29 @@ class KafkaConfigurationTest {
 
         @Test
         @SuppressWarnings("unchecked")
-        void kafkaUi_always_pointsAtTheBrokerAndAvoidsTheApplicationsPort() {
+        void kafkaUi_always_pointsAtTheBrokerAndAvoidsEveryServicesPort() {
             // GIVEN the inspection UI
             Map<String, Object> ui = service("kafka-ui");
 
-            // THEN it reaches the broker by service name and publishes on 8081 - 8080 is the
-            // application's
+            // THEN it reaches the broker by service name and publishes on 8086.
+            //
+            // NOT 8081, which it used until Phase 20 and which customer-service now owns. A port
+            // collision in compose is a container that exits with a one-line error most people
+            // scroll past, and the symptom would be "login stopped working" rather than anything
+            // about Kafka.
             assertThat(environment("kafka-ui"))
                     .containsEntry("KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS", "kafka:9092");
-            assertThat((List<String>) ui.get("ports")).containsExactly("8081:8080");
+            assertThat((List<String>) ui.get("ports")).containsExactly("8086:8080");
+        }
+
+        @Test
+        @SuppressWarnings("unchecked")
+        void kafkaUi_always_staysBehindTheObservabilityProfile() {
+            // THEN it is opt-in. Three more JVMs on a Docker VM already running six is the difference
+            // between a stack that idles and one that swaps - Phase 17 measured the four-JVM version
+            // of this problem at 428% CPU on an idle broker.
+            assertThat((List<String>) service("kafka-ui").get("profiles"))
+                    .containsExactly("observability");
         }
     }
 }

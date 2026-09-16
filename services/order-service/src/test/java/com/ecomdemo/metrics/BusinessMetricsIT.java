@@ -7,9 +7,7 @@ import java.util.regex.Pattern;
 import com.ecomdemo.cart.dto.AddCartItemRequest;
 import com.ecomdemo.cart.dto.CartItemResponse;
 import com.ecomdemo.cart.dto.CartResponse;
-import com.ecomdemo.product.dto.ProductRequest;
-import com.ecomdemo.product.dto.ProductResponse;
-import com.ecomdemo.support.AbstractPostgresIT;
+import com.ecomdemo.support.AbstractOrderServiceIT;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -30,7 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * class runs, {@code PlaceOrderIT} has already placed orders. Asserting {@code orders_placed_total
  * == 1} would pass alone and fail in a full build, which is the worst kind of test.
  */
-class BusinessMetricsIT extends AbstractPostgresIT {
+class BusinessMetricsIT extends AbstractOrderServiceIT {
 
     @BeforeEach
     void emptyTheCart() {
@@ -64,27 +62,25 @@ class BusinessMetricsIT extends AbstractPostgresIT {
     }
 
     private static final String ORDERS_PLACED =
-            "orders_placed_total{application=\"ecomdemo\"}";
+            "orders_placed_total{application=\"order-service\"}";
     private static final String ORDER_VALUE_COUNT =
-            "order_value_count{application=\"ecomdemo\"}";
+            "order_value_count{application=\"order-service\"}";
     private static final String ORDER_VALUE_SUM =
-            "order_value_sum{application=\"ecomdemo\"}";
+            "order_value_sum{application=\"order-service\"}";
     private static final String CHECKOUT_SUCCESS =
-            "order_checkout_seconds_count{application=\"ecomdemo\",outcome=\"success\"}";
+            "order_checkout_seconds_count{application=\"order-service\",outcome=\"success\"}";
     private static final String CHECKOUT_CONFLICT =
-            "order_checkout_seconds_count{application=\"ecomdemo\",outcome=\"conflict\"}";
+            "order_checkout_seconds_count{application=\"order-service\",outcome=\"conflict\"}";
 
     @Test
     void placingAnOrder_always_movesTheCounterTheSummaryAndTheTimerTogether() {
-        // GIVEN a product in the cart and the meters as they stand right now
-        ProductResponse lamp = admin.post().uri("/api/products")
-                .body(new ProductRequest("IT Metrics Lamp " + System.nanoTime(),
-                        "for the metrics IT", new BigDecimal("20.00"), 10, null))
-                .exchange().expectStatus().isCreated()
-                .expectBody(ProductResponse.class).returnResult().getResponseBody();
-
+        // GIVEN a product in the cart and the meters as they stand right now.
+        //
+        // The product comes from the stubbed catalogue rather than from POST /api/products - that
+        // endpoint is in catalog-service now, and this suite has no way to reach it. KEYBOARD is
+        // priced at 129.99; two of them is 259.98, which is what the revenue assertion below expects.
         client.post().uri("/api/cart/items")
-                .body(new AddCartItemRequest(lamp.id(), 3))
+                .body(new AddCartItemRequest(KEYBOARD.id(), 2))
                 .exchange().expectStatus().isOk();
 
         String before = scrape();
@@ -105,8 +101,8 @@ class BusinessMetricsIT extends AbstractPostgresIT {
                 .as("order.value observed exactly one more basket")
                 .isEqualTo(valueCountBefore + 1);
         assertThat(sample(after, ORDER_VALUE_SUM))
-                .as("3 lamps at 20.00 - the summary keeps the revenue as well as the shape")
-                .isEqualTo(valueSumBefore + 60.0);
+                .as("2 keyboards at 129.99 - the summary keeps the revenue as well as the shape")
+                .isEqualTo(valueSumBefore + 259.98);
         assertThat(sample(after, CHECKOUT_SUCCESS))
                 .as("one successful checkout attempt was timed")
                 .isEqualTo(successBefore + 1);

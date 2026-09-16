@@ -21,14 +21,32 @@ rule_files:
   - /etc/prometheus/alert-rules.yml
 
 scrape_configs:
-  # The application.
+  # The five services.
+  #
+  # One job rather than five, with every target listed under it. Prometheus adds an `instance` label
+  # holding the host:port it scraped, so the series stay distinguishable - and shared-kernel stamps
+  # an `application` label on every meter as well, which is the one a dashboard should filter on:
+  # `instance` changes when a container is recreated, `application` does not.
+  #
+  # Phase 15 wrote that the common tag would matter "the moment a second service scrapes into the
+  # same Prometheus". This is that moment. Without it, jvm_memory_used_bytes from five JVMs is one
+  # indistinguishable line.
+  #
+  # A target that is down is not an error here: Prometheus records `up == 0` for it and carries on
+  # scraping the rest, which is exactly what makes "which service is missing?" answerable at a
+  # glance rather than by reading five logs.
   - job_name: ecomdemo
     # Not the default /metrics. Actuator serves the Prometheus exposition format under its own path.
     metrics_path: /actuator/prometheus
     static_configs:
-      # `app`, not localhost - the same container-networking rule as everywhere else in this stack.
-      # localhost inside the Prometheus container is Prometheus.
-      - targets: ["app:8080"]
+      # Service names, not localhost - the same container-networking rule as everywhere else in this
+      # stack. localhost inside the Prometheus container is Prometheus.
+      - targets:
+          - "customer-service:8081"
+          - "catalog-service:8082"
+          - "inventory-service:8083"
+          - "order-service:8084"
+          - "notification-service:8085"
 
   # Prometheus scraping itself, so the monitoring is monitored. Cheap, and the first thing you want
   # when a dashboard looks wrong: it distinguishes "the app stopped reporting" from "Prometheus

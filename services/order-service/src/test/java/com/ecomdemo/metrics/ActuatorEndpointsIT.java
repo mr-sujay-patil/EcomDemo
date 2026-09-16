@@ -1,6 +1,10 @@
 package com.ecomdemo.metrics;
 
-import com.ecomdemo.support.AbstractPostgresIT;
+import com.ecomdemo.shared.testsupport.TestTokens;
+import com.ecomdemo.support.AbstractOrderServiceIT;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.springframework.test.web.servlet.client.RestTestClient;
 
 import org.junit.jupiter.api.Test;
 
@@ -14,7 +18,22 @@ import static org.assertj.core.api.Assertions.assertThat;
  * is one character from correct and publishes {@code /actuator/env}, where the resolved configuration
  * - and therefore the connection strings - can be read.
  */
-class ActuatorEndpointsIT extends AbstractPostgresIT {
+class ActuatorEndpointsIT extends AbstractOrderServiceIT {
+
+    /**
+     * An ADMIN client.
+     *
+     * <p>Minted rather than obtained by logging in: there is no login endpoint in this service, and
+     * the actuator rules here run on the role claim in a token this service verified itself. That is
+     * the property being tested as much as the endpoints are - /actuator is ADMIN-only in all five
+     * services, enforced five times, from five independently verified tokens.
+     */
+    protected RestTestClient admin;
+
+    @BeforeEach
+    void mintAnAdminToken() {
+        admin = clientFor(TestTokens.issueAdmin());
+    }
 
     @Test
     void health_forAnyone_reportsUpWithoutNamingItsComponents() {
@@ -29,7 +48,7 @@ class ActuatorEndpointsIT extends AbstractPostgresIT {
 
         // ...and nothing else. show-details is `when-authorized`, so the breakdown - which names the
         // database and Redis and reports whether they are struggling - stays behind a login.
-        assertThat(body).doesNotContain("components").doesNotContain("PostgreSQL").doesNotContain("redis");
+        assertThat(body).doesNotContain("components").doesNotContain("PostgreSQL");
     }
 
     @Test
@@ -40,7 +59,11 @@ class ActuatorEndpointsIT extends AbstractPostgresIT {
                 .expectBody(String.class).returnResult().getResponseBody();
 
         // THEN
-        assertThat(body).contains("components").contains("\"db\"").contains("\"redis\"");
+        // No "redis" any more: this service has no cache. Only catalog-service does, and only its
+        // readiness group names redis - which is why the shared default in ecomdemo-defaults.yml
+        // lists readinessState and db, and catalog-service overrides it rather than the other four
+        // declaring a component they do not have.
+        assertThat(body).contains("components").contains("\"db\"");
     }
 
     @Test
@@ -81,9 +104,14 @@ class ActuatorEndpointsIT extends AbstractPostgresIT {
         // THEN the JVM and HTTP binders are publishing...
         assertThat(body).contains("jvm_memory_used_bytes").contains("http_server_requests_seconds");
 
-        // ...every series carries the common tag from MetricsConfiguration, so a second application
-        // scraped into the same Prometheus stays distinguishable...
-        assertThat(body).contains("application=\"ecomdemo\"");
+        // ...every series carries the common tag shared-kernel's auto-configuration adds, naming
+        // THIS service rather than the project.
+        //
+        // Phase 15 added the tag and described it as something that would matter "the moment a
+        // second service scrapes into the same Prometheus". That moment arrived: there are five
+        // targets now, and without this label jvm_memory_used_bytes from five JVMs is one
+        // indistinguishable series on the dashboard.
+        assertThat(body).contains("application=\"order-service\"");
 
         // ...and the format is Prometheus's own, with HELP and TYPE lines rather than JSON.
         assertThat(body).contains("# HELP").contains("# TYPE");
