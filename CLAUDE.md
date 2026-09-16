@@ -26,7 +26,7 @@ later one.
 | Build | Maven, via the committed wrapper — always `./mvnw`, never a system `mvn` |
 | Database | PostgreSQL 16+ when the app runs (`dev` profile); H2 in-memory when the tests run (`test` profile) |
 | Schema | Owned by Flyway (`src/main/resources/db/migration`). Hibernate only validates |
-| Security | Spring Security, HTTP Basic, stateless. Roles `CUSTOMER` and `ADMIN` |
+| Security | Spring Security, JWT bearer tokens, stateless. Roles `CUSTOMER` and `ADMIN` |
 
 ## Build commands
 
@@ -199,6 +199,14 @@ recording a trade-off or a non-obvious constraint.
 
 ## Security
 
+**Authentication is a bearer token.** Credentials go to `POST /api/auth/login` once; every other
+request carries `Authorization: Bearer <token>`. The token is HS256, signed with `JWT_SECRET`, and
+carries the customer id as `sub` and the role as a claim — so authorizing a request needs no database
+read. **A JWT is signed, not encrypted:** anything in the payload is readable by whoever holds it.
+
+**Never put a secret, or anything you would not print on a postcard, in a claim.** And remember a
+token cannot be revoked — a change of role takes effect only when the current token expires.
+
 **Every endpoint is denied by default.** `WebSecurityConfiguration` lists what is public; adding an
 endpoint cannot accidentally publish it. Rules are matched in order, so the specific ones come first.
 
@@ -225,9 +233,9 @@ even if the hash is the password.
 
 - `@WithMockUser(roles = "ADMIN")` when only the role matters; `@WithMockCustomer(id = …)` when the
   controller needs a customer id from the principal.
-- A `@WebMvcTest` must `@Import({WebSecurityConfiguration.class, ApiErrorResponder.class,
-  SecurityMockMvcCustomizer.class})` — a slice loads controllers, not `@Configuration`, so without it
-  the real rules never load and `@AuthenticationPrincipal` is not even resolved.
+- A `@WebMvcTest` must `@Import(SecurityTestConfiguration.class)` — a slice loads controllers, not
+  `@Configuration`, so without it the real rules never load, the `JwtDecoder` is missing and
+  `@AuthenticationPrincipal` is not even resolved. Add new security beans to that one class.
 - `SecurityMockMvcCustomizer` applies `springSecurity()` to the MockMvc builder. The chain is
   stateless, so without it the test's `SecurityContext` is discarded per request and every
   authenticated test returns 401.

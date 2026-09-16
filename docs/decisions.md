@@ -558,3 +558,74 @@ The expand step from Phase 5, applied to a column that will simply never be tigh
 - No password reset, email verification, account lockout or login rate limiting.
 - No administrative view of other people's orders; that needs its own endpoint and rule.
 - One role per user.
+
+---
+
+## Phase 9 — Stateless Authentication with JWT
+
+**One dependency, not two.** `spring-boot-starter-oauth2-resource-server` pulls in
+`spring-security-oauth2-jose`, which carries `NimbusJwtDecoder` *and* `NimbusJwtEncoder` — so the same
+dependency both issues and verifies. Adding jjwt or java-jwt alongside it, as most tutorials do, would
+put two implementations of the same specification in one application with no benefit.
+
+**The principal stays a `SecurityUser`, and that decision kept the phase small.** A resource server
+puts a raw `Jwt` in the security context by default, which would have meant rewriting eight
+controllers and three `@PreAuthorize` expressions to read claims — and coupling every one of them to
+the token format. `JwtSecurityUserConverter` rebuilds a `SecurityUser` from the claims instead, with
+no database read, because the signature already proved the claims are ours and unaltered. Phase 8's
+code is untouched, and would survive a third change of authentication mechanism. How a caller proved
+who they are is not the business layer's concern.
+
+**HMAC (HS256), not RSA.** One application issues and verifies here, so one shared secret is the
+right fit and the simpler thing. The asymmetry matters as soon as there is a second party: with
+RS256 every service can verify using a public key while only the issuer can mint, whereas with HMAC
+**anyone who can verify can also forge** — every verifying service must hold the key that creates
+tokens. That is exactly why this choice stops working at the microservices split (Phase 20) or the
+moment an external identity provider appears, and it is worth having felt the constraint before
+meeting the solution.
+
+**The key comes from `JWT_SECRET`, and when it is absent one is generated at startup.** Committing a
+signing key is categorically different from committing the local database password or the admin's
+BCrypt hash, which are the precedents that might have justified it: a signing key lets anyone holding
+it mint a token for any user, including the administrator. Generating an ephemeral key keeps a fresh
+clone working with no setup and makes the trade visible — tokens stop working at every restart,
+because the thing that vouched for them is gone. A key under 256 bits fails at startup with a
+sentence saying how to make one, rather than at the first login with a Nimbus error about key lengths.
+
+**No refresh token, deliberately.** The roadmap lists one as optional, and the honest version is not
+small. A refresh token is only worth more than a long-lived access token if it can be *revoked*, and
+revocation needs server-side storage — a table, a migration, a rotation policy, and a decision about
+what happens when a refresh token is replayed. Without that it is a long-lived access token with extra
+steps and a wider blast radius. The trade being taught here is the one that matters: **a JWT cannot be
+withdrawn**, so the expiry is the only bound on how long a stolen or stale token stays useful, and
+choosing 15 minutes is choosing how much damage a leak can do against how often users log in again.
+
+**A failed login is mapped in `GlobalExceptionHandler`, unlike the other 401.** The distinction is
+where the failure happens. Missing or invalid *tokens* are rejected in the filter chain, before any
+controller, which is why `ApiErrorResponder` exists. A wrong *password* fails inside `AuthController`,
+which calls the `AuthenticationManager` itself — so the exception reaches the advice normally, and
+without a mapping the catch-all would have reported a wrong password as a 500.
+
+**Test slices import one `SecurityTestConfiguration`.** A `@WebMvcTest` loads controllers, not
+configuration, so each security bean has to be asked for explicitly. That list has now grown twice —
+once for the Phase 8 rules, once for the JWT decoder — and the failure when a piece is missing is a
+context-load error naming a missing bean rather than the test that needed it. Collecting it in one
+place means the next addition is a one-line change.
+
+**What OAuth2 and OIDC would add.** This application is currently both halves of OAuth2: the
+*authorization server* that issues tokens (`AuthController`) and the *resource server* that accepts
+them (everything else). OAuth2 standardises the protocol between those halves, so the issuer can be
+somebody else — Keycloak, Entra ID — with standard grant types for cases this login endpoint does not
+cover, such as a third-party application acting on a user's behalf without ever seeing their password.
+OIDC then adds identity on top of OAuth2's authorization: an `id_token` with standard claims about
+*who* the user is, plus a discovery document so a resource server can find the issuer's public keys by
+itself. Moving to either would change `AuthController` and `JwtConfiguration` and nothing else, which
+is the payoff for validating a signed token rather than a session.
+
+### Known gaps, deferred on purpose
+
+- No revocation, and therefore no logout that means anything server-side.
+- No refresh token; sessions end after 15 minutes and the user logs in again.
+- Swagger UI's bearer configuration is impossible until Phase 3 adds OpenAPI.
+- Tokens travel over plain HTTP locally; anywhere else that demands TLS.
+- HMAC does not survive the service split in Phase 20 — that will want RS256 or an external issuer.

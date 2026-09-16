@@ -14,7 +14,6 @@ import com.ecomdemo.order.OrderService;
 import com.ecomdemo.product.ProductController;
 import com.ecomdemo.product.ProductService;
 import com.ecomdemo.product.dto.ProductResponse;
-import com.ecomdemo.support.SecurityMockMvcCustomizer;
 import com.ecomdemo.support.WithMockCustomer;
 
 import org.junit.jupiter.api.Nested;
@@ -22,6 +21,8 @@ import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import com.ecomdemo.support.SecurityTestConfiguration;
+
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -48,7 +49,7 @@ import static org.mockito.BDDMockito.given;
  */
 @WebMvcTest(controllers = {ProductController.class, CartController.class,
         OrderController.class, CustomerController.class})
-@Import({WebSecurityConfiguration.class, ApiErrorResponder.class, SecurityMockMvcCustomizer.class})
+@Import(SecurityTestConfiguration.class)
 class SecurityRulesTest {
 
     @Autowired

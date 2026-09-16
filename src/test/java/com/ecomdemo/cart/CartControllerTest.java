@@ -16,11 +16,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.factory.annotation.Autowired;
-import com.ecomdemo.common.ApiErrorResponder;
-import com.ecomdemo.support.SecurityMockMvcCustomizer;
-import com.ecomdemo.common.WebSecurityConfiguration;
 
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import com.ecomdemo.support.SecurityTestConfiguration;
+
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -43,7 +42,7 @@ import static org.mockito.Mockito.verify;
  * not even resolved (Spring MVC falls back to treating SecurityUser as a model attribute and tries
  * to construct one). Importing them means these tests exercise the authorization rules that ship.
  */
-@Import({WebSecurityConfiguration.class, ApiErrorResponder.class, SecurityMockMvcCustomizer.class})
+@Import(SecurityTestConfiguration.class)
 class CartControllerTest {
 
     /** Matches the id in @WithMockCustomer, so the stubs and the principal agree. */

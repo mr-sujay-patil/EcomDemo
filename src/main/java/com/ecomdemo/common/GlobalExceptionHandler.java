@@ -5,6 +5,7 @@ import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -101,6 +102,23 @@ public class GlobalExceptionHandler {
         log.warn("Optimistic lock conflict after retries: {}", ex.getMessage());
         return build(HttpStatus.CONFLICT,
                 "Another request changed this data at the same time; please retry");
+    }
+
+    /**
+     * Login failed: no such account, or the wrong password.
+     *
+     * <p>This one belongs here rather than in {@link ApiErrorResponder}, unlike the other 401. A
+     * failed login happens <em>inside</em> a controller - {@code AuthController} calls the
+     * {@code AuthenticationManager} itself - so the exception reaches this advice normally, where
+     * without a mapping the catch-all below would report a wrong password as a 500.
+     *
+     * <p>The message distinguishes nothing. Saying "no such user" would turn this endpoint into a way
+     * to find out which email addresses are registered.
+     */
+    @ExceptionHandler(AuthenticationException.class)
+    public ResponseEntity<ApiError> handleFailedLogin(AuthenticationException ex) {
+        log.debug("Failed login attempt: {}", ex.getMessage());
+        return build(HttpStatus.UNAUTHORIZED, "Invalid email or password");
     }
 
     /** An argument a service rejected outright. */

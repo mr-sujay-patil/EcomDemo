@@ -1,6 +1,10 @@
 package com.ecomdemo.common;
 
 import org.springframework.context.annotation.Bean;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.ProviderManager;
+import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
+import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
@@ -37,6 +41,22 @@ public class SecurityConfiguration {
      * <p>Returning the {@link PasswordEncoder} interface rather than the concrete class is what makes
      * that change a one-line edit. Nothing else in the application names BCrypt.
      */
+    /**
+     * Checks an email and password. From Phase 9 this has exactly one caller - the login endpoint -
+     * because no other request carries credentials; they carry a token instead.
+     *
+     * <p>It is the same pair of collaborators the filter chain used for HTTP Basic:
+     * {@code CustomerDetailsService} finds the user, the {@code PasswordEncoder} compares the BCrypt
+     * hash. Only what happens after success changed.
+     */
+    @Bean
+    public AuthenticationManager authenticationManager(UserDetailsService userDetailsService,
+                                                       PasswordEncoder passwordEncoder) {
+        DaoAuthenticationProvider provider = new DaoAuthenticationProvider(userDetailsService);
+        provider.setPasswordEncoder(passwordEncoder);
+        return new ProviderManager(provider);
+    }
+
     @Bean
     public PasswordEncoder passwordEncoder() {
         return new BCryptPasswordEncoder();

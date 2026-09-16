@@ -3,6 +3,8 @@ package com.ecomdemo.support;
 import org.junit.jupiter.api.BeforeEach;
 
 import org.springframework.boot.test.context.SpringBootTest;
+import com.ecomdemo.auth.dto.LoginRequest;
+import com.ecomdemo.auth.dto.TokenResponse;
 import com.ecomdemo.customer.dto.CustomerResponse;
 import com.ecomdemo.customer.dto.RegisterRequest;
 
@@ -77,11 +79,11 @@ public abstract class AbstractPostgresIT {
      */
     protected RestTestClient anonymous;
 
-    /** Authenticated as the seeded ADMIN. The only client that may write to the catalogue. */
+    /** Holding a token for the seeded ADMIN. The only client that may write to the catalogue. */
     protected RestTestClient admin;
 
     /**
-     * Authenticated as a CUSTOMER registered fresh for each test.
+     * Holding a token for a CUSTOMER registered fresh for each test.
      *
      * <p>Fresh matters: carts and orders belong to a user now, and every integration test in the run
      * shares one container. Reusing an account would mean one test's cart contents arriving in the
@@ -94,8 +96,7 @@ public abstract class AbstractPostgresIT {
 
     @BeforeEach
     void bindClientsToRunningServer() {
-        anonymous = clientFor(null, null);
-        admin = clientFor(ADMIN_EMAIL, ADMIN_PASSWORD);
+        anonymous = clientFor(null);
 
         // Registered through the public endpoint rather than inserted directly, so every integration
         // test also exercises the registration path and the BCrypt hashing behind it.
@@ -108,22 +109,37 @@ public abstract class AbstractPostgresIT {
                 .returnResult().getResponseBody()
                 .id();
 
-        client = clientFor(email, CUSTOMER_PASSWORD);
+        // Every client now logs in once and carries the token it was given. That is the whole shape
+        // of the change in Phase 9: credentials are presented exactly once, and everything afterwards
+        // presents a signed statement about who logged in.
+        admin = clientFor(login(ADMIN_EMAIL, ADMIN_PASSWORD));
+        client = clientFor(login(email, CUSTOMER_PASSWORD));
+    }
+
+    /** Exchanges credentials for a token, the way any real client of this API would start. */
+    protected String login(String email, String password) {
+        return anonymous.post().uri("/api/auth/login")
+                .body(new LoginRequest(email, password))
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(TokenResponse.class)
+                .returnResult().getResponseBody()
+                .accessToken();
     }
 
     /**
      * Bound to the real server rather than to MockMvc, so requests travel over a socket through the
      * whole stack - Tomcat, the security filter chain, Jackson, the controller advice.
      *
-     * <p>HTTP Basic credentials go on every request, which is exactly how the scheme works: there is
-     * no session, so each request proves who it is from scratch.
+     * <p>The bearer token goes on every request. There is still no session - each request carries
+     * its own proof - but the proof is now a signed token rather than the password itself.
      */
-    private RestTestClient clientFor(String email, String password) {
+    protected RestTestClient clientFor(String accessToken) {
         // var, because RestTestClient.Builder is self-referentially generic - naming the raw type
         // erases it and the fluent methods stop resolving.
         var builder = RestTestClient.bindToServer().baseUrl("http://localhost:" + port);
-        return email == null
+        return accessToken == null
                 ? builder.build()
-                : builder.defaultHeaders(headers -> headers.setBasicAuth(email, password)).build();
+                : builder.defaultHeaders(headers -> headers.setBearerAuth(accessToken)).build();
     }
 }
