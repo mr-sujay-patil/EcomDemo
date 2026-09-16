@@ -6,6 +6,8 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.ecomdemo.customer.Customer;
+
 import jakarta.persistence.CascadeType;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -13,6 +15,8 @@ import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
 
@@ -33,6 +37,14 @@ public class Order {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    /**
+     * Who placed it. Nullable because orders predating Phase 8 have no owner and cannot be given one;
+     * they belong to nobody and no customer's query returns them.
+     */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "customer_id")
+    private Customer customer;
+
     @Column(name = "placed_at", nullable = false)
     private Instant placedAt;
 
@@ -45,7 +57,8 @@ public class Order {
     protected Order() {
     }
 
-    public Order(Instant placedAt) {
+    public Order(Customer customer, Instant placedAt) {
+        this.customer = customer;
         this.placedAt = placedAt;
         this.totalAmount = BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
     }
@@ -64,6 +77,10 @@ public class Order {
 
     public Long getId() {
         return id;
+    }
+
+    public Customer getCustomer() {
+        return customer;
     }
 
     public Instant getPlacedAt() {

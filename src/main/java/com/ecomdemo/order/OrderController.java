@@ -3,9 +3,11 @@ package com.ecomdemo.order;
 import java.net.URI;
 import java.util.List;
 
+import com.ecomdemo.customer.SecurityUser;
 import com.ecomdemo.order.dto.OrderResponse;
 
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -27,18 +29,18 @@ public class OrderController {
     }
 
     @PostMapping
-    public ResponseEntity<OrderResponse> place() {
-        OrderResponse order = orderService.placeOrder();
+    public ResponseEntity<OrderResponse> place(@AuthenticationPrincipal SecurityUser principal) {
+        OrderResponse order = orderService.placeOrder(principal.getId());
         return ResponseEntity.created(URI.create("/api/orders/" + order.id())).body(order);
     }
 
     @GetMapping
-    public List<OrderResponse> list() {
-        return orderService.findAll();
+    public List<OrderResponse> list(@AuthenticationPrincipal SecurityUser principal) {
+        return orderService.findAll(principal.getId());
     }
 
     @GetMapping("/{id}")
-    public OrderResponse get(@PathVariable Long id) {
-        return orderService.findById(id);
+    public OrderResponse get(@AuthenticationPrincipal SecurityUser principal, @PathVariable Long id) {
+        return orderService.findById(id, principal.getId());
     }
 }

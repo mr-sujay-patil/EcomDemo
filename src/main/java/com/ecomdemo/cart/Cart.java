@@ -5,17 +5,25 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
+import com.ecomdemo.customer.Customer;
 import com.ecomdemo.product.Product;
 
 import jakarta.persistence.CascadeType;
 import jakarta.persistence.Entity;
 import jakarta.persistence.FetchType;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
 
 /**
- * The one shared cart of this phase - no users yet, so a single row with a fixed id.
+ * One customer's cart. Exactly one per user, enforced by a unique constraint on {@code customer_id}
+ * in V7 rather than trusted to whatever code creates carts.
+ *
+ * <p>Until Phase 8 this was a single shared row with a fixed id, because there was nobody to own it.
  *
  * <p>The {@code items} association is the "one" side of a one-to-many. {@code cascade = ALL} means
  * saving or deleting the cart saves or deletes its items too; {@code orphanRemoval = true} means an
@@ -25,11 +33,17 @@ import jakarta.persistence.Table;
 @Table(name = "carts")
 public class Cart {
 
-    /** There is exactly one cart in this phase, seeded by data.sql. */
-    public static final Long SHARED_CART_ID = 1L;
-
     @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
+
+    /**
+     * The owner. LAZY because rendering a cart never needs the user's details - the caller already
+     * knows who they are, having just authenticated as them.
+     */
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "customer_id", nullable = false, unique = true)
+    private Customer customer;
 
     /**
      * LAZY is the default for @OneToMany and is kept deliberately: loading a cart should not drag
@@ -42,12 +56,16 @@ public class Cart {
     protected Cart() {
     }
 
-    public Cart(Long id) {
-        this.id = id;
+    public Cart(Customer customer) {
+        this.customer = customer;
     }
 
     public Long getId() {
         return id;
+    }
+
+    public Customer getCustomer() {
+        return customer;
     }
 
     public List<CartItem> getItems() {
