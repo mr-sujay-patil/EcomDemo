@@ -64,7 +64,7 @@ jobs:
         # failed - which would discard the reports precisely when the build is red and they are the
         # only thing that explains why.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-reports-${{ github.run_number }}
           path: |
