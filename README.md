@@ -1616,7 +1616,7 @@ curl -s localhost:8080/api/notifications -H "Authorization: Bearer $TOKEN" | jq 
 #### Watch the event itself
 
 ```bash
-# the raw record, key and all - the key is the order id
+# the raw record, key and all - the key is the order id. Ctrl-C to stop.
 docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
   --bootstrap-server localhost:9092 --topic orders.placed \
   --from-beginning --property print.key=true
@@ -1649,7 +1649,8 @@ above, and watch it be skipped rather than acted on:
 
 ```bash
 docker compose exec kafka /opt/kafka/bin/kafka-console-producer.sh \
-  --bootstrap-server localhost:9092 --topic orders.placed --property parse.key=true --property key.separator='|'
+  --bootstrap-server localhost:9092 --topic orders.placed \
+  --reader-property parse.key=true --reader-property key.separator='|'
 # paste (one line), using an eventId that has already been processed:
 # 1|{"eventId":"3047b899-...","orderId":1,"customerId":2,"placedAt":"2026-09-16T16:23:33.637Z","totalAmount":259.98,"items":[]}
 
@@ -1672,6 +1673,10 @@ docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
   --bootstrap-server localhost:9092 --topic orders.placed-dlt --from-beginning
 # {not even valid json
 ```
+
+The payload in the DLT is the malformed text, not base64 of it, and the handler could read it — two
+things that were broken the first time this was run and are now pinned by tests. See
+[`docs/decisions.md`](docs/decisions.md) for why each was invisible until the stack was up.
 
 Note what did **not** happen: it never visited `orders.placed-retry-0`. A payload that cannot be
 parsed will not parse in two seconds either, so `DeserializationException` is non-retryable and goes

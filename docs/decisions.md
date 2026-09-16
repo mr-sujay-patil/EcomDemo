@@ -1262,7 +1262,7 @@ because a row it never asked about is missing. Today the producer shares the dat
 key would work; the moment notifications move out it would not, and a schema that has to be unpicked
 later is worse than one that was honest from the start.
 
-### Three things only running it revealed
+### Six things only running it revealed
 
 **`JsonSerializer` is the Jackson 2 one and cannot serialize an `Instant`.** Spring Kafka 4.1 ships
 both `JsonSerializer` (Jackson 2, `com.fasterxml.jackson`) and `JacksonJsonSerializer` (Jackson 3,
@@ -1277,6 +1277,33 @@ failure the payload is still the original `byte[]`, and asking a JSON serializer
 produces a JSON string containing base64 — `"e25vdCBldmVuIHZhbGlkIGpzb24="` instead of the malformed
 payload someone needs to see. Nothing looks broken; you only find out by opening the topic. A
 `DelegatingByTypeSerializer` passes raw bytes through and sends everything else to Jackson.
+
+**The dead-letter handler could not read its own topic.** `@DltHandler` never ran, and the only
+evidence a poison message had arrived was the record itself. A record reaches the DLT precisely
+because it could not be turned into an `OrderPlacedEvent` — and the DLT consumer was deserializing
+with Jackson like every other topic, so it failed on exactly the payload it exists to report. The
+integration test passed throughout, because it read the DLT with a consumer of its own; it now
+asserts the handler ran too. `DelegatingByTopicDeserializer` reads that one topic as raw bytes, which
+cannot fail.
+
+**Configuring that failed twice, silently, in two different ways.** The pattern list is parsed as
+comma-separated `<pattern>:<class>` pairs with no trimming, so a YAML folded block (`>`) — which
+joins its lines with a space — turns the second entry's pattern into `" .+"` and quietly drops it.
+Then, with both entries on one line, the patterns turned out to be matched in a *map's iteration
+order* rather than the order they are written: `.+` is not a fallback, it is a competitor that also
+matches `orders.placed-dlt` and wins roughly half the time. That one passed the integration test and
+misbehaved in a container, from identical configuration. The supported way to say "everything else"
+is the separate `.default` key, so there is now exactly one pattern and no ambiguity to lose.
+
+**Four JVMs on a 4 GB Docker VM, and only one of them had a heap limit.** Kafka's start script
+defaults to `-Xmx1G` and Kafka UI is a Spring Boot application that sizes its heap against the whole
+machine. Together with the application and Grafana that was enough to push the lot into GC thrash —
+at which point the broker could not answer its own broker-to-controller heartbeat inside its 2 second
+timeout, fenced itself, unloaded all 50 `__consumer_offsets` partitions, and every consumer rejoined,
+repeatedly. It presents as a broker pinned at **428% CPU with an empty topic**, which looks like
+anything except a memory problem. With `KAFKA_HEAP_OPTS: -Xms512m -Xmx512m` and a 1 GB container
+limit it idles under 30%. This is the same lesson the `app` service's memory limit already carried
+from Phase 10, and adding a second and third JVM to the stack is what made it bite.
 
 **Fixing that took three attempts, because Spring Boot's back-off rules bite in different ways.**
 Declaring an extra `KafkaTemplate` bean does not add one alongside Boot's — Boot's is
