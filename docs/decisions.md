@@ -629,3 +629,93 @@ is the payoff for validating a signed token rather than a session.
 - Swagger UI's bearer configuration is impossible until Phase 3 adds OpenAPI.
 - Tokens travel over plain HTTP locally; anywhere else that demands TLS.
 - HMAC does not survive the service split in Phase 20 — that will want RS256 or an external issuer.
+
+---
+
+## Phase 10 — Containerization
+
+**A three-stage build, and the middle one is the interesting one.** Stage 1 compiles with the
+project's own `./mvnw` on a JDK; stage 2 explodes the layered jar; stage 3 copies those layers onto a
+JRE. Measured here: the build stage is **1.19 GB**, the final image **399 MB**. Everything that makes
+the difference — the compiler, the Maven repository, the sources, the 59 MB fat jar — is discarded.
+A single-stage build would ship all of it, and the parts that help you build are exactly the parts an
+attacker would like to find at runtime.
+
+**`./mvnw`, not a `maven:` image.** `CLAUDE.md` says the wrapper is the only build entry point, and
+that has to be true inside the image too, or the container builds with a different Maven than every
+developer and CI runner uses.
+
+**The jarmode changed, and every older tutorial is wrong.** Spring Boot 3.3 replaced
+`-Djarmode=layertools` with `-Djarmode=tools extract`, and the old form is gone in Boot 4. Verified
+against the real jar before writing the Dockerfile. One further trap: `extract` refuses to write into
+a non-empty directory, so the jar has to live somewhere other than its own destination — copying it
+into the extraction directory fails the build with a message about the directory, not the jar.
+
+**Layers are ordered by rate of change, which is the whole point.** Measured:
+dependencies 59 MB, spring-boot-loader 696 kB, snapshot-dependencies 4 kB, application 426 kB. One
+`COPY` per layer, least-changing first, so a code change rebuilds 426 kB and reuses the 59 MB. The
+same reasoning drives copying `pom.xml` before `src/`: dependency resolution is then cached
+independently of source edits, and editing a Java file does not re-download the internet.
+
+**Alpine, with the trade named.** `eclipse-temurin:21-jre-alpine` against `:21-jre` is roughly 399 MB
+versus what would be ~80 MB more. Alpine uses musl rather than glibc, which is fine for a pure-JVM
+application and would not be if a glibc-only native library ever appeared. Worth choosing
+deliberately rather than copying.
+
+**Non-root, and not as a checkbox.** Root in a container is root on the host kernel — the isolation
+is namespaces, not a virtual machine — so a container escape from uid 0 starts from a much better
+position than one from uid 100. `USER` comes *after* the `COPY`s so the files are owned by root and
+the application cannot modify its own installation; `--chown` on each COPY avoids a second layer that
+exists only to fix permissions.
+
+**`-XX:MaxRAMPercentage=75.0`, paired with a compose memory limit.** A modern JVM reads the
+container's limit rather than the host's, but caps the heap at 25% of it by default — a 768 MB
+container would run with a ~192 MB heap and GC constantly while three quarters of its allowance sat
+idle. 75% leaves room for metaspace, thread stacks and direct buffers, which live outside the heap
+and are counted by the OOM killer; that headroom is why the number is not 90%.
+
+**`depends_on: condition: service_healthy`, not the default.** The default `service_started` means
+"the container exists", which is why so many compose files grow a sleep in an entrypoint. With a
+`pg_isready` health check the app simply does not start until the database answers, and the startup
+log shows it: postgres Started → Waiting → Healthy → app Started.
+
+**PostgreSQL is not published to the host.** The app reaches it as `postgres` on the compose network,
+which is the container-networking lesson made structural rather than described: each container has
+its own network namespace, so `localhost` inside the app container is the app container. Not
+publishing also avoids colliding with the standalone Phase 4 container. Those two databases are
+entirely separate, with separate volumes — a point worth remembering when data appears to vanish.
+
+**Secrets via `${VAR:?message}`.** Compose refuses to start with a message naming the variable,
+rather than falling back to a default password nobody chose. `.env` was already gitignored from Phase
+0; `.env.example` documents what is required and contains nothing usable.
+
+### Cloud Native Buildpacks, compared by building both
+
+`./mvnw spring-boot:build-image` needs no Dockerfile at all. Both images were built and measured:
+
+| | Dockerfile | Buildpacks |
+|---|---|---|
+| Image size | **399 MB** | **755 MB** |
+| Layers | 11 | 20 |
+| Runs as | `ecomdemo` (uid 100) | uid 1002 |
+| Build time (cold) | ~2 min | ~2.5 min |
+| Dockerfile to maintain | yes | none |
+
+**What Buildpacks get right for free:** a non-root user, a sensible JVM memory calculator, layered
+output, reproducible builds, and — the real argument — *someone else patches the base image*. When a
+CVE lands in the JRE, a rebuilt buildpack image picks up the fix without anyone editing anything. A
+Dockerfile pins a base image that somebody has to remember to bump.
+
+**Why this project uses a Dockerfile anyway:** the phase is about understanding containers, and a
+Dockerfile is where the concepts are visible — stages, layer ordering, `USER`, the JVM flag. A
+buildpack does all of that correctly and invisibly, which is exactly wrong for learning and exactly
+right for production. The 356 MB difference is the honest cost of the transparency; Buildpacks are
+what I would reach for on a team that would rather not own this file.
+
+### Known gaps, deferred on purpose
+
+- Base images are pinned by tag, not digest, so `21-jre-alpine` can change beneath the build.
+- The image is never pushed anywhere - a registry is part of CI in Phase 11.
+- The health check probes a business endpoint because Actuator is Phase 15.
+- No resource limits on the postgres service, and no non-root user for it either - the official
+  image handles that itself, but it is not something this project controls.

@@ -56,7 +56,7 @@ flowchart LR
 | 7 | Testcontainers | Data | ✅ Complete |
 | 8 | Spring Security (users & roles) | Security | ✅ Complete |
 | 9 | JWT authentication | Security | ✅ Complete |
-| 10 | Containerization (Docker & Compose) | Quality & Delivery | ⬜ |
+| 10 | Containerization (Docker & Compose) | Quality & Delivery | ✅ Complete |
 | 11 | CI with GitHub Actions | Quality & Delivery | ⬜ |
 | 12 | Code quality with SonarQube | Quality & Delivery | ⬜ |
 | 13 | Redis caching | Performance | ⬜ |
