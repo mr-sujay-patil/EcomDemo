@@ -1,33 +1,31 @@
+# Settings shared by every profile. Anything database-specific lives in application-<profile>.yml,
+# because from Phase 4 on the application runs against PostgreSQL but the tests still run against an
+# embedded H2, and the two need different datasource and schema settings.
 spring:
   application:
     name: ecomdemo
 
-  # In-memory H2. DB_CLOSE_DELAY=-1 keeps the database alive for the whole JVM lifetime
-  # rather than dropping it when the last connection closes.
-  datasource:
-    url: jdbc:h2:mem:ecomdemo;DB_CLOSE_DELAY=-1
-    driver-class-name: org.h2.Driver
-    username: sa
-    password: ""
+  # The profile used when nothing else is specified. The SPRING_PROFILES_ACTIVE environment variable
+  # and --spring.profiles.active both override this, and @ActiveProfiles overrides it in tests.
+  profiles:
+    active: dev
 
   jpa:
-    hibernate:
-      ddl-auto: create-drop        # Hibernate generates the schema from the @Entity classes
-    defer-datasource-initialization: true   # ...so data.sql must run AFTER that, not before
     open-in-view: false            # no lazy loading during JSON serialisation - map to DTOs in the service
     show-sql: true
     properties:
       hibernate:
         format_sql: true
-
-  sql:
-    init:
-      mode: always                 # always execute data.sql, including for embedded databases
-
-  h2:
-    console:
-      enabled: true
-      path: /h2-console
+        jdbc:
+          # Bind and read timestamps as UTC rather than in the JVM's default zone, so the same code
+          # behaves identically on a laptop in IST and a server in UTC.
+          #
+          # PostgreSQL alone would not need this: Hibernate maps Order.placedAt (an Instant) to
+          # TIMESTAMP_UTC, which it realises as `timestamp with time zone`, and that column stores an
+          # unambiguous point in time. The setting earns its place because the test profile runs on
+          # H2, where the mapping is not guaranteed to match - pinning the zone removes the machine
+          # and the engine as variables at once.
+          time_zone: UTC
 
 server:
   error:

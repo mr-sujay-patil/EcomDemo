@@ -1,0 +1,32 @@
+# Local development against a real PostgreSQL instance.
+#
+# Credentials come from environment variables so that no real secret is ever committed. The defaults
+# after each ':' are the throwaway local values the README's `docker run` command creates - safe to
+# commit precisely because they grant access to nothing but a local scratch database.
+spring:
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/ecomdemo}
+    username: ${POSTGRES_USER:ecomdemo}
+    password: ${POSTGRES_PASSWORD:ecomdemo}
+
+    # The driver class is deliberately not set: HikariCP derives it from the jdbc:postgresql: prefix.
+    hikari:
+      pool-name: EcomDemoPool
+      maximum-pool-size: 10        # connections are a server-side resource; PostgreSQL's own default
+                                   # limit is 100 total, so a pool per service must stay modest
+      minimum-idle: 2              # keep a couple warm so the first request does not pay for a handshake
+      connection-timeout: 30000    # ms a caller waits for a free connection before failing fast
+      idle-timeout: 600000         # ms an idle connection above minimum-idle survives (10 min)
+      max-lifetime: 1800000        # ms before a connection is retired (30 min) - must stay below any
+                                   # database or network idle timeout, or the pool hands out dead sockets
+
+  jpa:
+    hibernate:
+      ddl-auto: update             # Hibernate adds missing tables and columns but never drops data.
+                                   # Phase 5 replaces this with Flyway: `update` cannot rename,
+                                   # cannot drop, and never tells you what it changed.
+
+  sql:
+    init:
+      mode: never                  # data.sql would re-insert the whole catalogue on EVERY restart
+                                   # against a persistent database. The README seeds it once by hand.

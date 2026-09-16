@@ -50,7 +50,7 @@ flowchart LR
 | 1 | Git & GitHub workflow | Foundation | ✅ Complete |
 | 2 | Automated testing (JUnit 5, Mockito, MockMvc) | Foundation | ✅ Complete |
 | 3 | API documentation (OpenAPI / Swagger) | Foundation | ⬜ |
-| 4 | PostgreSQL | Data | ⬜ |
+| 4 | PostgreSQL | Data | ✅ Complete |
 | 5 | Flyway migrations | Data | ⬜ |
 | 6 | Transactions & concurrency | Data | ⬜ |
 | 7 | Testcontainers | Data | ⬜ |

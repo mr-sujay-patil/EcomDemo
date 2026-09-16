@@ -86,7 +86,10 @@ curl -s -XPOST localhost:8080/api/orders                                  # 409 
 ./mvnw clean verify
 ```
 
-### H2 console
+### H2 console — *superseded in Phase 4*
+
+The application no longer runs on H2; see [Phase 4](#phase-4--postgresql) for connecting to
+PostgreSQL. Kept here as a record of what Phase 0 shipped.
 
 <http://localhost:8080/h2-console> (while the app is running)
 
@@ -229,3 +232,148 @@ deliberately breaking the production code and watching them go red:
   that when line two is out of stock, line one's stock is **still 40** and the cart is untouched.
   Moving the stock check inside the mutation loop fails this test and nothing else — not even the
   full-stack integration test, which is exactly why the pyramid has a base.
+
+---
+
+## Phase 4 — PostgreSQL
+
+**Added:** PostgreSQL, and Spring profiles to go with it. The application now talks to a real
+database that keeps your data between runs; the test suite keeps an embedded one so the build still
+needs nothing installed.
+
+- **The driver swap** — `org.postgresql:postgresql` at runtime scope, H2 demoted to `test`. The
+  `spring-boot-h2console` dependency is gone: it configures a console that only understands H2.
+- **Two profiles** — `application-dev.yml` (PostgreSQL) and `application-test.yml` (H2). `dev` is the
+  default, so `./mvnw spring-boot:run` needs no extra flag, and tests set `@ActiveProfiles("test")`.
+- **Credentials from the environment** — `POSTGRES_URL`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, each
+  with a local default. Nothing that grants real access is committed.
+- **An explicit HikariCP pool** — sizes and lifetimes are written down in `application-dev.yml`
+  rather than inherited silently from the library's defaults.
+- **`ddl-auto: update`** — Hibernate still generates the schema, but now it *adds* to an existing one
+  instead of dropping it. Phase 5 replaces this with Flyway.
+
+### Prerequisites
+
+Java 21, plus a PostgreSQL 16 or newer to talk to. Docker is the quickest route — Docker itself is
+studied properly in Phase 10, so treat this as one command to copy:
+
+```bash
+docker run --name ecomdemo-postgres \
+  -e POSTGRES_DB=ecomdemo \
+  -e POSTGRES_USER=ecomdemo \
+  -e POSTGRES_PASSWORD=ecomdemo \
+  -p 5432:5432 \
+  -v ecomdemo-pgdata:/var/lib/postgresql \
+  -d postgres:18-alpine
+```
+
+The named volume `ecomdemo-pgdata` is what makes the data outlive the container itself.
+
+> **PostgreSQL 18 changed the volume path.** Older recipes mount
+> `-v …:/var/lib/postgresql/data`; on 18 the image declares `/var/lib/postgresql` and puts the
+> cluster in `/var/lib/postgresql/18/docker`. Mounting the old path appears to work and then quietly
+> fails to persist anything. Use the path above, or pin `postgres:17-alpine` and the old path.
+
+Stopping and starting it later:
+
+```bash
+docker stop ecomdemo-postgres          # your data stays in the volume
+docker start ecomdemo-postgres
+```
+
+Prefer a native install? Anything that gives you a database, user and password of `ecomdemo` on
+`localhost:5432` works — or point the environment variables somewhere else.
+
+### Run it
+
+```bash
+./mvnw spring-boot:run                        # uses the dev profile by default
+```
+
+Hibernate creates the five tables on first start. The catalogue is **not** seeded automatically any
+more — against a database that survives restarts, re-running `data.sql` every time would add another
+ten products on every boot. Seed it once:
+
+```bash
+docker exec -i ecomdemo-postgres psql -U ecomdemo -d ecomdemo < src/main/resources/data.sql
+```
+
+### Try it — prove the data survives
+
+```bash
+# 1. create something through the API
+curl -s -XPOST localhost:8080/api/products -H 'Content-Type: application/json' \
+     -d '{"name":"Phase 4 Survivor","description":"Created before a restart","price":42.50,"stockQuantity":7}' | jq
+
+# 2. place an order, so stock moves and the cart empties
+curl -s -XPOST localhost:8080/api/cart/items -H 'Content-Type: application/json' \
+     -d '{"productId":1,"quantity":2}' | jq
+curl -s -XPOST localhost:8080/api/orders | jq
+
+# 3. stop the application (Ctrl-C) and start it again
+./mvnw spring-boot:run
+
+# 4. everything is still there - this is the whole point of the phase
+curl -s localhost:8080/api/products/11 | jq     # the product you created
+curl -s localhost:8080/api/orders/1 | jq        # the order you placed
+curl -s localhost:8080/api/products/1 | jq      # stock is 38, not back to 40
+```
+
+Under Phase 0's H2 this sequence returned `404` after every restart.
+
+### Pointing at a different database
+
+The dev profile reads three environment variables, falling back to the local defaults above:
+
+```bash
+POSTGRES_URL=jdbc:postgresql://db.internal:5432/ecomdemo \
+POSTGRES_USER=app \
+POSTGRES_PASSWORD='...' \
+./mvnw spring-boot:run
+```
+
+### Connecting with a DB client
+
+[DBeaver](https://dbeaver.io) or [pgAdmin](https://www.pgadmin.org) — the replacement for Phase 0's
+H2 console, and the way to read the schema Hibernate generated:
+
+| Field | Value |
+|---|---|
+| Host / Port | `localhost` / `5432` |
+| Database | `ecomdemo` |
+| User / Password | `ecomdemo` / `ecomdemo` |
+
+Worth looking at once connected, because it is where PostgreSQL differs visibly from H2:
+
+```sql
+\d products      -- id is 'bigint ... generated by default as identity', price is numeric(12,2)
+\d orders        -- placed_at is 'timestamp with time zone'
+```
+
+Or without a client at all:
+
+```bash
+docker exec -it ecomdemo-postgres psql -U ecomdemo -d ecomdemo
+```
+
+### Tests
+
+Unchanged in how you run them, and still needing no database:
+
+```bash
+./mvnw clean verify        # 74 tests
+```
+
+The suite runs under the `test` profile on H2 in `MODE=PostgreSQL`. That keeps the build hermetic —
+important for CI in Phase 11 — at the cost of not exercising real PostgreSQL. **Phase 7
+(Testcontainers) is what closes that gap**; until then, treat a green build as evidence about your
+logic, not about PostgreSQL compatibility.
+
+### Known limits of Phase 4
+
+- `ddl-auto: update` never drops or renames anything and never reports what it did. Rename a field
+  and you get a second column beside the old one. Phase 5 (Flyway) replaces it.
+- Tests do not run against PostgreSQL (Phase 7).
+- The local password is in `application-dev.yml`. That is deliberate — it opens a throwaway local
+  database and nothing else — but a real deployment sets the environment variables instead.
+- Two concurrent orders for the last unit in stock can still both succeed (Phase 6).
