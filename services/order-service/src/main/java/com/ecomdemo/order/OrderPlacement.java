@@ -14,6 +14,7 @@ import com.ecomdemo.order.client.InventoryClient;
 import com.ecomdemo.order.client.ReservationRequest;
 import com.ecomdemo.order.dto.OrderResponse;
 import com.ecomdemo.shared.ConflictException;
+import com.ecomdemo.shared.ServiceUnavailableException;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,6 +40,20 @@ import org.springframework.web.client.RestClientResponseException;
  *   <li>save the order and clear the cart - this database, one transaction;
  *   <li>publish {@code orders.placed} - Kafka, after the commit (see {@link OrderService}).
  * </ol>
+ *
+ * <h2>What Phase 22 changed here</h2>
+ *
+ * Two things, both about how failure is <em>reported</em> rather than about the flow.
+ *
+ * <p>A dependency being unreachable is now a <strong>503, not a 409</strong>. The distinction is not
+ * cosmetic: 409 says "your request conflicts with our state", which sends a shopper to rebuild a
+ * cart that was never the problem, and it is a status nobody alerts on - so an outage reported as a
+ * conflict is an outage nobody sees.
+ *
+ * <p>And the calls themselves are guarded. {@code catalogClient} is a {@code ResilientCatalogClient}
+ * (circuit breaker + retry) and {@code inventoryClient} a {@code ResilientInventoryClient}
+ * (bulkhead), injected here by interface exactly as before - this class did not need to change to
+ * receive them, which is the point of decorating at the bean rather than at the call site.
  *
  * <h2>The part that is not solved, stated plainly</h2>
  *
@@ -181,13 +196,19 @@ class OrderPlacement {
             products = catalogClient.findAll().stream()
                     .filter(product -> productIds.contains(product.id()))
                     .collect(Collectors.toMap(CatalogProduct::id, Function.identity()));
-        } catch (RestClientException ex) {
+        } catch (ServiceUnavailableException | RestClientException ex) {
             // No fallback and no cached price. Charging somebody from a stale number is worse than
             // telling them to try again, so this is one of the places where a dependency being down
             // genuinely means this service cannot do its job.
+            //
+            // 503, not the 409 this threw until Phase 22. A 409 told the shopper their cart was the
+            // problem; they would rebuild it and hit the same wall. It also lied to the dashboard -
+            // a 409 is a normal business outcome nobody alerts on, so reporting an outage as one
+            // made the outage invisible.
             String detail = "Cannot price the cart: catalog-service is unavailable";
             orderAuditService.recordAttempt(OrderAudit.Outcome.INSUFFICIENT_STOCK, detail, null);
-            throw new ConflictException(detail);
+            throw new ServiceUnavailableException(
+                    "The product catalogue is temporarily unavailable. Please try again shortly.", ex);
         }
 
         for (Long productId : productIds) {
@@ -225,10 +246,17 @@ class OrderPlacement {
                 throw new ConflictException("One or more items are no longer available in the quantity requested");
             }
             throw ex;
+        } catch (ServiceUnavailableException ex) {
+            // Already the right shape - the bulkhead rejected the call, or a fallback turned a
+            // transport failure into a 503. Recorded and re-thrown untouched.
+            orderAuditService.recordAttempt(OrderAudit.Outcome.INSUFFICIENT_STOCK,
+                    "Cannot reserve stock: " + ex.getMessage(), null);
+            throw ex;
         } catch (RestClientException ex) {
             String detail = "Cannot reserve stock: inventory-service is unavailable";
             orderAuditService.recordAttempt(OrderAudit.Outcome.INSUFFICIENT_STOCK, detail, null);
-            throw new ConflictException(detail);
+            throw new ServiceUnavailableException(
+                    "Checkout is temporarily unavailable. Please try again shortly.", ex);
         }
     }
 

@@ -94,6 +94,97 @@ ecomdemo:
     inventory:
       base-url: ${INVENTORY_BASE_URL:http://localhost:8083}
 
+# Resilience4j: what happens when a neighbour is slow or down.
+#
+# Every number here is a trade-off rather than a default, and the comments say which way.
+resilience4j:
+  circuitbreaker:
+    instances:
+      # Guards order-service -> catalog-service.
+      catalog:
+        # COUNT_BASED: decide on the last N calls, not the last N seconds. On a low-traffic demo a
+        # TIME_BASED window can hold two calls, and a "50% failure rate" computed from two calls is
+        # noise. Count-based means the breaker needs real evidence before it acts.
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: 10
+        # Do not judge before there is something to judge. Without this the first failed call is a
+        # 100% failure rate and the circuit opens on one bad request.
+        minimumNumberOfCalls: 5
+        failureRateThreshold: 50
+
+        # How long to stay open before letting anything through. Ten seconds so the demo in the
+        # README is watchable; a real system would use longer, because the cost of probing too early
+        # is that the recovering service gets traffic before it is ready.
+        waitDurationInOpenState: 10s
+        # Half-open automatically rather than waiting for a call to arrive - otherwise a service with
+        # no traffic never discovers that its dependency came back.
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        # Three probes decide it. All three must succeed, or it opens again.
+        permittedNumberOfCallsInHalfOpenState: 3
+
+        # A 4xx is an ANSWER, not a failure. Without this, a shopper asking for a product that does
+        # not exist would push the breaker towards opening, and enough 404s would cut off a catalogue
+        # that was working perfectly.
+        ignoreExceptions:
+          - org.springframework.web.client.HttpClientErrorException
+
+        # NOT wired into the health endpoint, deliberately.
+        #
+        # An open circuit means MY NEIGHBOUR is down, not "stop sending me traffic". Wiring it to
+        # readiness would remove order-service from the load balancer because catalog-service was
+        # struggling - a cascading failure caused by the tool meant to prevent one. The same
+        # liveness-vs-readiness lesson as Phase 15, in a new costume.
+        registerHealthIndicator: false
+
+  retry:
+    instances:
+      catalog:
+        # Three attempts in total, not three retries after the first.
+        maxAttempts: 3
+        waitDuration: 200ms
+        # Exponential: whatever is broken is usually either better almost immediately or not better
+        # for a while, and a fixed interval helps neither case.
+        enableExponentialBackoff: true
+        exponentialBackoffMultiplier: 2
+        # Jitter, and this is the line that prevents a retry storm.
+        #
+        # Without it, every order-service instance that failed at the same moment retries at the same
+        # moment. A dependency that fell over under load then gets a synchronised burst exactly as it
+        # tries to recover, fails again, and the retries keep it down - the clients doing the most to
+        # "help" being precisely what prevents recovery. Randomising the wait spreads the burst out.
+        enableRandomizedWait: true
+        randomizedWaitFactor: 0.5
+
+        ignoreExceptions:
+          # Same reasoning as the breaker: a 404 is an answer and must not be retried. Retrying it
+          # would triple the load for a question already answered.
+          - org.springframework.web.client.HttpClientErrorException
+
+          # AND an open circuit must not be retried, which is the subtler of the two and was found by
+          # running the stack rather than by reading the config.
+          #
+          # Retry is the OUTERMOST decorator, so when the breaker rejects a call it throws
+          # CallNotPermittedException and the retry treats that like any other failure: it waits and
+          # tries again, twice, and the breaker rejects it twice more. Measured here, an open circuit
+          # was answering in ~700ms instead of microseconds, and the not_permitted counter read 48
+          # for 16 requests - three rejections each.
+          #
+          # That defeats the entire purpose. The value of an open circuit is that it fails FAST;
+          # spending 700ms and two backoff sleeps to be told "no" three times is worse than useless,
+          # because it holds a request thread for the duration while achieving nothing. There is
+          # nothing to retry: the breaker's answer will not change within the backoff window.
+          - io.github.resilience4j.circuitbreaker.CallNotPermittedException
+
+  bulkhead:
+    instances:
+      # Guards order-service -> inventory-service reservations. See ResilientInventoryClient for why
+      # this call and not another.
+      inventory:
+        maxConcurrentCalls: 8
+        # Reject immediately rather than queue. Queueing converts thread exhaustion into memory
+        # exhaustion and adds latency to a request that is going to fail anyway.
+        maxWaitDuration: 0
+
 management:
   metrics:
     distribution:
@@ -102,3 +193,16 @@ management:
         # covers two HTTP calls to other services as well as the local database work, so its p95 is
         # the first place a slow neighbour shows up.
         order.checkout: true
+
+  # The circuit breaker, retry and bulkhead meters reach /actuator/prometheus on their own:
+  # resilience4j-micrometer comes with the starter and binds to whatever MeterRegistry exists. They
+  # also pick up the application="order-service" common tag from shared-kernel, because that is a
+  # MeterRegistryCustomizer applied to the registry rather than to individual meters.
+  #
+  # What IS switched off is the health contribution. An open circuit means my neighbour is down, not
+  # "stop sending me traffic" - see registerHealthIndicator above for why letting it reach readiness
+  # would turn one struggling dependency into a fleet-wide outage.
+  health:
+    circuitbreakers:
+      enabled: false
+

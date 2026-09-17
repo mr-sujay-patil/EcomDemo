@@ -41,9 +41,16 @@ import org.springframework.web.service.invoker.HttpServiceProxyFactory;
  * both calls should take single-digit milliseconds, so a timeout here means something is wrong, not
  * that the limit was tight.
  *
- * <p>Timeouts bound the damage, they do not prevent it. The rest - a circuit breaker that stops
- * calling a neighbour that is clearly down, a bulkhead so one slow dependency cannot consume every
- * thread - is Resilience4j, which is Phase 22.
+ * <p><strong>Timeouts bound the damage; they do not prevent it</strong>, and Phase 22 did not replace
+ * them. The circuit breaker and bulkhead added there sit <em>on top of</em> these two lines and
+ * depend on them completely: a breaker opens on a failure rate, and a call with no read timeout never
+ * fails - it hangs, forever, and the breaker never sees anything to count.
+ *
+ * <p>This is why "timeouts are the first line of defence" is meant literally rather than as a slogan.
+ * It is also why Resilience4j's {@code @TimeLimiter} is NOT used here: it works by running the call
+ * on another thread and cancelling a {@code CompletableFuture}, and a blocking RestClient call
+ * returns a value rather than a future. Annotating these methods with it would look like protection
+ * and provide none.
  */
 @Configuration
 public class ServiceClientsConfiguration {
@@ -70,15 +77,26 @@ public class ServiceClientsConfiguration {
      */
     private static final Duration READ_TIMEOUT = Duration.ofSeconds(10);
 
-    @Bean
-    public CatalogClient catalogClient(
+    /*
+     * These two beans are the RAW clients - the generated HTTP proxies, with no circuit breaker, no
+     * retry and no bulkhead.
+     *
+     * The bean names matter: ResilientCatalogClient and ResilientInventoryClient inject them by
+     * @Qualifier and wrap them, and are themselves @Primary. So anything asking for a CatalogClient
+     * gets the protected one, and only the wrapper can reach the bare one. Naming them
+     * `catalogClient` would make the ambiguity resolvable only by @Primary, and a future bean that
+     * asked for the wrong one would get it silently.
+     */
+
+    @Bean("rawCatalogClient")
+    public CatalogClient rawCatalogClient(
             @Value("${ecomdemo.clients.catalog.base-url}") String baseUrl,
             ClientHttpRequestInterceptor bearerTokenPropagation) {
         return clientFor(CatalogClient.class, baseUrl, bearerTokenPropagation);
     }
 
-    @Bean
-    public InventoryClient inventoryClient(
+    @Bean("rawInventoryClient")
+    public InventoryClient rawInventoryClient(
             @Value("${ecomdemo.clients.inventory.base-url}") String baseUrl,
             ClientHttpRequestInterceptor bearerTokenPropagation) {
         return clientFor(InventoryClient.class, baseUrl, bearerTokenPropagation);

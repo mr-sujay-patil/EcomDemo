@@ -1,4 +1,4 @@
-# EcomDemo
+/u# EcomDemo
 
 A learning project that grows an e-commerce backend from a single Spring Boot monolith into a
 production-grade distributed system, adding **exactly one** technology per phase.
@@ -1883,3 +1883,136 @@ These are deliberate, and each names the phase that addresses it.
   feature packages instead.
 - **One PostgreSQL server, five databases.** The code boundary is exactly as strict as five servers
   would give; the operational one is not — losing that container takes all five services down.
+
+---
+
+## Phase 22 — Resilience
+
+**Added:** Resilience4j — a circuit breaker and retry on order-service → catalog-service, a bulkhead
+on the stock reservation, and a 503 that tells the truth.
+
+Phase 20 gave order-service two synchronous dependencies and timeouts to bound them. Timeouts stop a
+call hanging forever; they do nothing about the *next* thousand calls, each of which still waits the
+full ten seconds to discover the same outage. This phase is about what happens after the first
+failure.
+
+### What was added where
+
+| Guard | On | Why there |
+|---|---|---|
+| Circuit breaker | `catalogClient` | Stops paying a 10s timeout per request to rediscover a dead service |
+| Retry (3, exponential, jittered) | `catalogClient` | A dropped packet should not fail a checkout |
+| Bulkhead (8 concurrent) | `inventoryClient.reserve` | A *slow* inventory-service must not consume every request thread |
+| Timeout | already there, Phase 20 | The first line of defence — see below |
+
+`ResilientCatalogClient` and `ResilientInventoryClient` implement the same interfaces and are
+`@Primary`, so `CartService` and `OrderPlacement` inject exactly what they did before and get the
+protected version without knowing. Decoration that requires every caller to opt in is decoration that
+gets skipped somewhere.
+
+### Three things worth understanding before reading the code
+
+**Timeouts are the first line of defence, literally.** A circuit breaker opens on a *failure rate*,
+and a call with no read timeout never fails — it hangs, and the breaker never sees anything to count.
+The Phase 20 timeouts in `ServiceClientsConfiguration` are what make everything here possible.
+
+**Resilience4j's `@TimeLimiter` is deliberately not used.** It works by running the call on another
+thread and cancelling a `CompletableFuture`; a blocking `RestClient` call returns a value and cannot
+be interrupted that way. Annotating these methods with it would look like protection and provide
+none.
+
+**An open circuit must not make order-service unready.** `registerHealthIndicator: false`, and
+`management.health.circuitbreakers.enabled: false`. An open circuit means *my neighbour* is down, not
+*stop sending me traffic* — wiring it to readiness would pull order-service out of the load balancer
+because catalog-service was struggling, a cascading failure caused by the tool meant to prevent one.
+
+### Try it — kill catalog-service and watch
+
+```bash
+docker compose up -d --build
+# register + log in against :8081, and put TOKEN in your shell - see the Phase 20 walkthrough
+
+docker compose stop catalog-service
+
+# Five requests. Watch the time collapse as the circuit opens mid-sequence.
+for i in 1 2 3 4 5; do
+  curl -s -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
+    -X POST http://localhost:8084/api/cart/items -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' -d '{"productId":1,"quantity":1}'
+done
+```
+
+Measured on the running stack:
+
+```
+=== CLOSED: each request really tries, and retries ===
+  request 1: HTTP 503 in  1490.0 ms
+  request 2: HTTP 503 in   621.6 ms
+  request 3: HTTP 503 in    37.0 ms     <- circuit opened here
+  request 4: HTTP 503 in    20.1 ms
+  request 5: HTTP 503 in    12.4 ms
+
+=== OPEN: nothing leaves the process ===
+  request 1: HTTP 503 in     9.4 ms   | rejections: 1
+  request 2: HTTP 503 in    13.8 ms   | rejections: 1
+```
+
+**1490ms → 9ms.** That 160-fold difference is the whole point: a request thread held for a second and
+a half is a request thread not serving anybody else.
+
+The body is a 503 with a `Retry-After`, not a 409:
+
+```json
+{"status":503,"message":"The product catalogue is temporarily unavailable. Please try again shortly."}
+```
+
+And nothing else broke — this is the cascading failure that did not happen:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8084/api/orders -H "Authorization: Bearer $TOKEN"
+#   200
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8084/actuator/health/readiness
+#   200   <- an open circuit must NOT make this service unready
+```
+
+### Watch it heal
+
+```bash
+docker compose start catalog-service
+```
+
+```
+state right after catalog-service came back: HALF_OPEN
+  state=HALF_OPEN  request -> HTTP 200 in  1581.6 ms
+  state=HALF_OPEN  request -> HTTP 200 in   399.0 ms
+  state=CLOSED     request -> HTTP 200 in    98.1 ms
+```
+
+No human intervention: `automaticTransitionFromOpenToHalfOpenEnabled` means a service with no traffic
+still discovers that its dependency came back.
+
+### See it in Grafana
+
+```bash
+docker compose --profile observability up -d
+# http://localhost:3000 -> EcomDemo Overview -> "Resilience" row
+```
+
+Four panels: circuit breaker state as a timeline, calls by outcome (watch `not_permitted` climb —
+that is load order-service stopped putting on a struggling dependency), failure rate against the 50%
+threshold, and free bulkhead permits. The last is the early-warning panel: it falls *before* anything
+is rejected.
+
+### Known limits of Phase 22
+
+- **Only order-service is guarded.** The other four make no outbound calls, so there is nothing to
+  protect. When Phase 21's gateway arrives it will want per-route breakers of its own.
+- **No retry budget.** Resilience4j caps retries per call, not the *proportion* of total traffic that
+  may be retries. Under a broad outage, three-attempts-per-request is still 3× load on a recovering
+  system — jitter spreads the burst but does not bound it.
+- **Bulkhead limits are guesses.** Eight concurrent reservations was chosen by reasoning, not by
+  measurement. The honest way to set it is load testing, which is **Phase 30**.
+- **You still cannot see which hop was slow.** Five services, five logs, no trace. **Phase 23**.
+- **No fallback cache.** When the catalogue is down, checkout fails rather than pricing from a
+  remembered value — deliberately, because charging somebody from a stale price is worse than asking
+  them to try again.

@@ -399,6 +399,25 @@ exception unless you ask otherwise. Every exception this codebase throws from a 
 (`NotFoundException`, `ConflictException`) is unchecked, so the default is the one we want — but a
 checked exception added later would need `@Transactional(rollbackFor = ...)`.
 
+**Two resilience libraries, and the line between them.** Spring Framework 7's
+`org.springframework.resilience` (`@Retryable`, `@ConcurrencyLimit`) and Resilience4j are both on the
+classpath in order-service. The line is drawn by *what is being protected*, never by which is newer:
+
+| Concern | Tool |
+|---|---|
+| Local optimistic-lock contention | Spring `@Retryable` (`OrderService`, `StockService`) |
+| A remote HTTP call | Resilience4j (`ResilientCatalogClient`, `ResilientInventoryClient`) |
+
+A database write has no remote party to protect and must never acquire a circuit breaker - opening a
+circuit on lock contention would refuse writes because writes were contended. Never put both on the
+same call.
+
+**Resilience4j decorators are applied outermost-first** (`Retry → CircuitBreaker → ... → Bulkhead`),
+and **`fallbackMethod` belongs on the outermost one**. A fallback runs inside the aspect that declares
+it, so a fallback on `@CircuitBreaker` translates the exception before the outer `@Retry` can classify
+it - which silently turns "fail fast when the circuit is open" into "retry the rejection three times".
+See `docs/decisions.md` for the measured version of that mistake.
+
 **Writes that race take `@Version`.** `Product` carries one. Optimistic locking suits data that is
 read often and written rarely: it takes no locks and costs nothing until a collision actually
 happens, at which point the loser is told to redo the work. Retry it a bounded number of times

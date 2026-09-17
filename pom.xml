@@ -57,6 +57,18 @@
             to read Java 21 class files.
         -->
         <jacoco.version>0.8.15</jacoco.version>
+
+        <!--
+            Resilience4j is not managed by the Spring Boot BOM, so it carries an explicit version -
+            checked against the effective POM rather than assumed.
+
+            2.4.0 is the first line to publish a `resilience4j-spring-boot4` artifact. The
+            long-standing `resilience4j-spring-boot3` is still published at the same version and is
+            the one every tutorial names; it targets Boot 3 and its auto-configuration binds against
+            APIs that moved. Picking the right one of two artifacts that differ by a single digit is
+            the whole compatibility question for this phase.
+        -->
+        <resilience4j.version>2.4.0</resilience4j.version>
         <sonar-maven-plugin.version>5.8.0.7211</sonar-maven-plugin.version>
 
         <!--
