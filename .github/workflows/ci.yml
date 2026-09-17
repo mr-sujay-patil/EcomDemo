@@ -76,7 +76,7 @@ jobs:
           if-no-files-found: ignore
 
   publish:
-    name: Publish image to GHCR
+    name: Publish ${{ matrix.service }} to GHCR
     # Two guards, and both are needed. `needs` makes this job wait for the tests and skip entirely
     # if they failed, so an untested image can never be published. The `if` restricts it to pushes,
     # because the same workflow runs on pull requests and a PR must not publish anything - not least
@@ -85,6 +85,21 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     runs-on: ubuntu-latest
+
+    # One image per service since Phase 20 split the monolith into five deployables.
+    #
+    # A matrix rather than five copied jobs: the five differ by one word, and five copies means four
+    # that drift. fail-fast is off because the services are independent - notification-service
+    # failing to publish is no reason to abandon an order-service image that built perfectly.
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - customer-service
+          - catalog-service
+          - inventory-service
+          - order-service
+          - notification-service
 
     permissions:
       contents: read
@@ -109,10 +124,15 @@ jobs:
 
       - name: Work out the image name
         id: image
-        # GHCR rejects uppercase characters in an image name, and this repository is
+# GHCR rejects uppercase characters in an image name, and this repository is
         # mr-sujay-patil/EcomDemo. ${VAR,,} is bash lower-casing; without it every push fails with
         # an error about the name rather than about the case.
-        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+        #
+        # The service name is appended, so the five images are
+        # ghcr.io/mr-sujay-patil/ecomdemo/order-service and so on. One image name for five services
+        # would have each overwrite the last, and `latest` would mean whichever finished most
+        # recently.
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}/${{ matrix.service }}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -122,6 +142,11 @@ jobs:
         with:
           context: .
           push: true
+          # Which module's jar goes into this image. The Dockerfile is parameterised by this since
+          # Phase 20 - without it the COPY resolves to /build/services//target/*.jar and the build
+          # fails on an empty path, which reads as a missing file rather than a missing argument.
+          build-args: |
+            SERVICE=${{ matrix.service }}
           # Two tags for one image, because they answer different questions.
           #
           # The SHA tag is immutable and identifies exactly one commit: it is what a deployment
@@ -132,17 +157,20 @@ jobs:
           tags: |
             ${{ steps.image.outputs.name }}:${{ github.sha }}
             ${{ steps.image.outputs.name }}:latest
-          # Layer cache in GitHub's own storage, so the 59 MB dependency layer survives between runs
-          # and only changes when pom.xml does - the same layering the Dockerfile sets up in Phase 10,
+          # Layer cache in GitHub's own storage, so the dependency layer survives between runs and
+          # only changes when a POM does - the same layering the Dockerfile sets up in Phase 10,
           # paying off across builds rather than within one.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          #
+          # Scoped per service: the five images share a build stage but diverge at the extract step,
+          # and one shared cache key would have them evicting each other's layers on every run.
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
       - name: Summarise what was published
         # Writes to the run's summary page rather than burying it in the log.
         run: |
           {
-            echo "### Image published"
+            echo "### ${{ matrix.service }} published"
             echo ""
             echo '```'
             echo "${{ steps.image.outputs.name }}:${{ github.sha }}"
