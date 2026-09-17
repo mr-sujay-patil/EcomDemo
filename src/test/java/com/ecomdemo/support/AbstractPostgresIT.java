@@ -12,6 +12,7 @@ import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.test.web.servlet.client.RestTestClient;
 import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.kafka.KafkaContainer;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
@@ -77,9 +78,30 @@ public abstract class AbstractPostgresIT {
     protected static final GenericContainer<?> REDIS =
             new GenericContainer<>("redis:8-alpine").withExposedPorts(6379);
 
+    /**
+     * A real Kafka broker, for the events the application has published since Phase 17.
+     *
+     * <p>{@code org.testcontainers.kafka.KafkaContainer} - note the package. The class of the same
+     * name in {@code org.testcontainers.containers} is the older Confluent-image-plus-ZooKeeper one,
+     * and both are in the jar. This is the KRaft-native one running Apache's own image, pinned to
+     * the same tag {@code compose.yaml} uses.
+     *
+     * <p>{@code @ServiceConnection} contributes {@code spring.kafka.bootstrap-servers} from the
+     * container's random host port, through {@code ApacheKafkaContainerConnectionDetailsFactory} in
+     * {@code spring-boot-kafka}. The container advertises a host-reachable address of its own
+     * accord, so unlike the broker in compose it can be spoken to from outside its network.
+     *
+     * <p>Every integration test gets one, for the same reason every one gets a Redis: these tests
+     * run the production configuration, and that configuration has a broker in it. A context that
+     * could not reach one would be testing a different application.
+     */
+    @ServiceConnection
+    protected static final KafkaContainer KAFKA = new KafkaContainer("apache/kafka:4.2.1");
+
     static {
         POSTGRES.start();
         REDIS.start();
+        KAFKA.start();
     }
 
     @LocalServerPort

@@ -27,6 +27,142 @@ spring:
           # and the engine as variables at once.
           time_zone: UTC
 
+  # Apache Kafka. Every setting here is shared by dev and test; the test profile only switches the
+  # listeners off so `./mvnw test` still needs no broker.
+  kafka:
+    # Overridden by SPRING_KAFKA_BOOTSTRAP_SERVERS in compose. The local default matches a broker
+    # published on the host, which is what a `docker run` of apache/kafka would give you.
+    #
+    # "Bootstrap" is literal: this address is used once, to ask the cluster for its full topology.
+    # Everything after that goes straight to whichever broker leads the partition being read or
+    # written, at the address that broker advertises. Listing every broker here is therefore not
+    # required - it only buys resilience for that first call.
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # JacksonJsonSerializer, not JsonSerializer.
+      #
+      # Spring Kafka 4.1 ships both, and the difference is which Jackson they use: JsonSerializer is
+      # the Jackson 2 one (com.fasterxml.jackson), Jackson* is the Jackson 3 one (tools.jackson) that
+      # Spring Boot 4 standardised on. It matters immediately - Jackson 2 refuses to serialize
+      # java.time.Instant without the JSR-310 module registered, and OrderPlacedEvent.placedAt is an
+      # Instant, so the older pair fails at the first checkout with "Java 8 date/time type not
+      # supported by default". Jackson 3 handles it out of the box.
+      #
+      # Same trap as tools.jackson vs com.fasterxml.jackson in the test sources: every example
+      # written before Boot 4 names the class that no longer works here.
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+
+      # Wait for the leader AND every in-sync replica to have written the record before calling the
+      # send successful.
+      #
+      # acks=1 (leader only) is the setting that quietly loses data: the leader acknowledges, then
+      # fails before any follower has copied the record, and a follower that never saw it is
+      # elected. acks=all is the difference between at-least-once and "at-least-once unless
+      # something goes wrong", and the cost is a few milliseconds.
+      acks: all
+
+      # Keep trying. A retriable failure is usually a leader election in progress, which resolves in
+      # seconds; failing the send instead would push a transient problem all the way up to checkout.
+      retries: 10
+
+      properties:
+        # Retries alone can duplicate: the broker may have written the record and lost the network
+        # before acknowledging, so the client retries something already stored. The idempotent
+        # producer gives each producer a session id and each record a sequence number, and the
+        # broker discards a duplicate it has already seen.
+        #
+        # This is exactly-once semantics *for the write*, and it is worth being clear about how far
+        # that reaches: it removes duplicates caused by producer retries, and nothing else. An
+        # application that publishes the same order twice still publishes it twice, which is why
+        # the consumer is idempotent as well.
+        enable.idempotence: true
+
+        # How long send() may block waiting for cluster metadata before giving up. The default is
+        # 60 seconds, and it is a blocking wait on the calling thread - with a broker down, every
+        # checkout would hang for a minute before the event failed. 5 seconds is long enough to ride
+        # out a leader election and short enough that a real outage degrades rather than freezes.
+        max.block.ms: 5000
+
+    consumer:
+      # The consumer group. Kafka divides a topic's partitions among the members of a group, so
+      # running a second instance of this application does not double-deliver anything - it takes
+      # over some of the partitions. Two *different* group ids would each get every message, which
+      # is how independent features subscribe to the same topic.
+      group-id: ecomdemo-notifications
+
+      # Where a brand new group starts. `earliest` replays the topic from the beginning; `latest`
+      # (the default) would silently skip every event published before the consumer first started,
+      # which on a fresh stack means the ones you just produced while testing.
+      auto-offset-reset: earliest
+
+      # Do not commit offsets on a timer.
+      #
+      # Auto-commit acknowledges records the consumer has *received*, not records it has finished
+      # handling - a crash between the commit and the handler is a lost message, silently. Turning
+      # it off hands the decision to the listener container, which commits after the listener method
+      # returns normally. That is what makes the delivery at-least-once rather than at-most-once.
+      enable-auto-commit: false
+
+      # ErrorHandlingDeserializer wraps the real deserializer and catches what it throws.
+      #
+      # Without it a malformed message is not a failed record, it is a failed poll: the container
+      # asks for the batch again, fails to deserialize again, and the partition stops moving
+      # forever. No retry, no dead letter, no progress - just a log line every few seconds. This is
+      # the single most important line in this block, and the failure it prevents looks like a hung
+      # consumer rather than an error.
+      key-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+
+      properties:
+        spring.deserializer.key.delegate.class: org.apache.kafka.common.serialization.StringDeserializer
+        # Which deserializer to use is decided per topic, not once for the application.
+        #
+        # The dead-letter topic is the reason. A record lands there precisely because it could not be
+        # turned into an OrderPlacedEvent, so pointing the DLT consumer at a JSON deserializer means
+        # it fails on exactly the payload it exists to report - the @DltHandler never runs, nothing is
+        # logged, and the only evidence that anything arrived is the record itself. (Found by running
+        # the stack: the IT read the DLT with its own raw consumer and passed, while the application's
+        # own handler was silently failing.)
+        #
+        # ByteArrayDeserializer cannot fail, which is what a dead-letter consumer needs.
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.DelegatingByTopicDeserializer
+        #
+        # One pattern and a separate default, rather than two patterns.
+        #
+        # The patterns are matched in the iteration order of a map, which is not the order they are
+        # written in - so listing `.+` as the second entry does not make it a fallback, it makes it a
+        # competitor that also matches `orders.placed-dlt` and wins about half the time. That is the
+        # worst kind of bug: the integration test passed while the same configuration in a container
+        # sent the DLT through Jackson. `.default` is the supported way to say "everything else".
+        #
+        # Also one unbroken quoted line: the value is parsed as comma-separated <pattern>:<class>
+        # pairs with no trimming, and a YAML folded block (>) joins its lines with a space, which
+        # silently corrupts the entry after the first.
+        spring.kafka.value.serialization.bytopic.config: "orders\\.placed-dlt:org.apache.kafka.common.serialization.ByteArrayDeserializer"
+        spring.kafka.value.serialization.bytopic.default: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+
+        # The producer writes a __TypeId__ header naming the class it serialised. Trusting every
+        # package would let whoever can write to the topic name any class on the classpath and have
+        # Jackson construct it - the shape of several remote-code-execution bugs. An allow-list of
+        # one package is the whole defence.
+        spring.json.trusted.packages: com.ecomdemo.order.event
+
+        # And when there is no header at all - a message hand-crafted with kafka-console-producer,
+        # say - deserialize it as this. Without a default such a message fails, which is a fine
+        # outcome, but a deliberate one is easier to reason about.
+        spring.json.value.default.type: com.ecomdemo.order.event.OrderPlacedEvent
+
+    listener:
+      # Commit the offset after each record's listener method returns, rather than after a batch.
+      #
+      # Slower - one commit per message - and the right default here, because the unit of work is
+      # one notification. With BATCH, a failure on the fourth record of a poll of ten re-delivers
+      # all ten, and the idempotency table would be carrying weight it should not have to.
+      ack-mode: record
+
+
 # Everything this application needs to sign and verify its own tokens.
 ecomdemo:
   jwt:

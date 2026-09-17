@@ -42,6 +42,9 @@ class OrderServiceTest {
     @Mock
     private OrderPlacement orderPlacement;
 
+    @Mock
+    private OrderEventPublisher orderEventPublisher;
+
     private OrderService orderService;
 
     private static final Long CUSTOMER_ID = 42L;
@@ -53,7 +56,7 @@ class OrderServiceTest {
         // test knows which methods the production code calls. What the meters actually record is
         // OrderMetricsTest's job.
         orderService = new OrderService(orderRepository, orderPlacement,
-                new OrderMetrics(new SimpleMeterRegistry()));
+                new OrderMetrics(new SimpleMeterRegistry()), orderEventPublisher);
     }
 
     private static final Instant NOW = Instant.parse("2026-09-16T10:15:30Z");

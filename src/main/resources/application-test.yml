@@ -33,3 +33,30 @@ spring:
   test:
     database:
       replace: none
+
+  # No broker in the fast suite.
+  #
+  # Three existing tests are full @SpringBootTest contexts on H2, and a Kafka auto-configuration
+  # that tried to reach a broker would turn `./mvnw test` into something that needs Docker - which
+  # Phase 7 established it must not. Each of these switches off a different thing that would
+  # otherwise connect at startup:
+  kafka:
+    # Nothing listens here. Explicit rather than inherited, so a test that does reach a broker is
+    # obviously reaching the wrong one.
+    bootstrap-servers: localhost:1
+    listener:
+      # The listener containers are not started, so no consumer ever polls. Without this the
+      # container threads retry a dead broker for the length of the build, logging as they go.
+      auto-startup: false
+    admin:
+      # KafkaAdmin creates the NewTopic beans at context refresh. auto-create false means it never
+      # opens an AdminClient, so the retry and dead-letter topics @RetryableTopic declares are not
+      # attempted either.
+      auto-create: false
+    producer:
+      properties:
+        # The publisher is called for real by OrderRetryTest and OrderAuditRollbackTest, which place
+        # orders. send() blocks waiting for cluster metadata; 250ms keeps that from being the
+        # slowest thing in the suite. The failure is caught and logged - a checkout that has already
+        # committed must not be undone because a broker is unreachable.
+        max.block.ms: 250

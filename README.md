@@ -1543,3 +1543,160 @@ forever.
 - **No trace exemplars**, so a slow request on a graph cannot be opened as a trace. Phase 23.
 - **Checkout only.** Cart abandonment, catalogue browsing and login failures are all measurable and
   none of them are measured yet.
+
+---
+
+## Phase 17 — Messaging
+
+**Added:** Apache Kafka in KRaft mode (no ZooKeeper) and Kafka UI in Compose. Checkout now publishes
+an event, and a new `notification` feature consumes it — the first thing in this application that
+happens *after* a request has already been answered.
+
+- **`orders.placed`**, three partitions, **keyed by order id** — which is what makes every event
+  about one order ordered relative to the others.
+- **A `notification` consumer** that "sends" a confirmation: a log line plus a `notifications` row.
+- **Retry topics and a dead-letter topic** — `orders.placed-retry-0`, `-retry-1`, `orders.placed-dlt`
+  — via `@RetryableTopic`. A message that cannot be *parsed* skips the retries and goes straight to
+  the DLT.
+- **An idempotent consumer**: `processed_events.event_id` is a primary key, so a re-delivered event
+  is recorded once no matter how many times Kafka hands it over.
+- **`GET /api/notifications`** — this customer's confirmations, newest first.
+- **Testcontainers Kafka** in `AbstractPostgresIT`, so every integration test runs against a real
+  broker.
+
+### Start it
+
+```bash
+cp .env.example .env          # Kafka needs nothing new here
+docker compose up -d --build
+```
+
+| What | Where | Credentials |
+|---|---|---|
+| Application | http://localhost:8080 | — |
+| **Kafka UI** | **http://localhost:8081** | **none** |
+| Prometheus | http://localhost:9090 | none |
+| Grafana | http://localhost:3000 | `admin` / your `GRAFANA_PASSWORD` |
+
+The broker itself is **not published**: the app reaches it as `kafka:9092` on the compose network.
+Use Kafka UI, or `docker compose exec kafka ...`, to look inside.
+
+### Try it
+
+```bash
+# register a shopper and log in - only the ADMIN account is seeded
+curl -s -X POST localhost:8080/api/customers/register -H 'Content-Type: application/json' \
+  -d '{"email":"kafka@ecomdemo.local","password":"password123","displayName":"Kafka Demo"}' > /dev/null
+TOKEN=$(curl -s -X POST localhost:8080/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"kafka@ecomdemo.local","password":"password123"}' | jq -r .accessToken)
+
+# put something in the cart and check out
+curl -s -X POST localhost:8080/api/cart/items -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"productId":1,"quantity":2}' > /dev/null
+curl -s -X POST localhost:8080/api/orders -H "Authorization: Bearer $TOKEN" | jq '{id, totalAmount}'
+# {"id": 1, "totalAmount": 259.98}
+```
+
+The POST returned as soon as the order was committed. The confirmation is written by a different
+thread, reading from the broker, after the response was already on its way back:
+
+```bash
+# the producer and the consumer, in the app's log
+docker compose logs app | grep -E "orders.placed published|Received orders.placed|NOTIFICATION to"
+# orders.placed published: order=1 eventId=3047b899-... partition=1 offset=0
+# Received orders.placed: order=1 eventId=3047b899-...
+# NOTIFICATION to customer 2: Thank you! Order #1 is confirmed - 1 line(s), total 259.98.
+
+# and the durable record of it
+curl -s localhost:8080/api/notifications -H "Authorization: Bearer $TOKEN" | jq '.[0]'
+# {"id":1,"orderId":1,"message":"Thank you! Order #1 is confirmed - 1 line(s), total 259.98.", ...}
+```
+
+#### Watch the event itself
+
+```bash
+# the raw record, key and all - the key is the order id. Ctrl-C to stop.
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic orders.placed \
+  --from-beginning --property print.key=true
+# 1    {"eventId":"3047b899-...","orderId":1,"customerId":2,"placedAt":"2026-09-16T16:23:33.637Z", ...}
+
+# which partition did it land in, and what is the group's lag?
+docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 --describe --group ecomdemo-notifications
+```
+
+Or open **Kafka UI** at http://localhost:8081 — topics, partitions, offsets, consumer-group lag, and
+the messages themselves.
+
+#### Prove the consumer is idempotent
+
+Every event this application has finished handling leaves a row keyed by its id:
+
+```bash
+docker compose exec postgres psql -U ecomdemo -d ecomdemo \
+  -c "select event_id, event_type, processed_at from processed_events order by processed_at desc limit 3;"
+
+# one notification per event, not per delivery
+docker compose exec postgres psql -U ecomdemo -d ecomdemo \
+  -c "select event_id, count(*) from notifications group by event_id having count(*) > 1;"
+# (0 rows)  <- a duplicate delivery would still be one row here
+```
+
+Re-publish an event the consumer has already handled, copying an `eventId` from the console consumer
+above, and watch it be skipped rather than acted on:
+
+```bash
+docker compose exec kafka /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server localhost:9092 --topic orders.placed \
+  --reader-property parse.key=true --reader-property key.separator='|'
+# paste (one line), using an eventId that has already been processed:
+# 1|{"eventId":"3047b899-...","orderId":1,"customerId":2,"placedAt":"2026-09-16T16:23:33.637Z","totalAmount":259.98,"items":[]}
+
+docker compose logs app | grep "Skipping duplicate"
+# Skipping duplicate delivery of OrderPlacedEvent 3047b899-... for order 1 - already handled
+```
+
+#### Send a poison message to the dead-letter topic
+
+```bash
+docker compose exec kafka /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server localhost:9092 --topic orders.placed
+# type this and press enter:
+# {not even valid json
+
+docker compose logs app | grep "DEAD LETTER"
+# DEAD LETTER from orders.placed: failed to deserialize - payload: {not even valid json
+
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic orders.placed-dlt --from-beginning
+# {not even valid json
+```
+
+The payload in the DLT is the malformed text, not base64 of it, and the handler could read it — two
+things that were broken the first time this was run and are now pinned by tests. See
+[`docs/decisions.md`](docs/decisions.md) for why each was invisible until the stack was up.
+
+Note what did **not** happen: it never visited `orders.placed-retry-0`. A payload that cannot be
+parsed will not parse in two seconds either, so `DeserializationException` is non-retryable and goes
+straight to the DLT. Note also that the main topic kept moving — that is the point of retrying on a
+*different* topic rather than in place.
+
+### Known limits of Phase 17
+
+- **Checkout is a dual write, and it is not fixed here.** The order is committed to PostgreSQL and
+  *then* the event is sent. If the send fails — broker down, process killed in between — the order
+  exists and the event does not, and nothing reconciles them. The send failure is logged and never
+  fails the purchase, which is the right call once the transaction has committed but does not close
+  the hole. **Phase 18's transactional outbox is the fix**, and this phase deliberately leaves the
+  problem visible first.
+- **One broker, replication factor 1.** Nothing survives losing it. The three
+  `KAFKA_*_REPLICATION_FACTOR: 1` settings in `compose.yaml` exist only because of that.
+- **No schema registry.** The contract is a Java record plus a trusted-packages allow-list.
+- **No exactly-once between consuming and producing** — that needs a transactional producer.
+- **Nothing drains the DLT.** It is a queue for humans, on purpose; replay tooling is not built.
+- **`processed_events` grows forever.** Expiring old rows needs a scheduler this phase does not add.
+- **No consumer-lag panel** on the Phase 15 dashboard, which is the first thing a real deployment
+  would add.
+- **PLAINTEXT, no authentication**, on the compose network only.

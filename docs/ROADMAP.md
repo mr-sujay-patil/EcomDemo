@@ -63,7 +63,7 @@ flowchart LR
 | 14 | Spring Batch | Performance | ⬜ |
 | 15 | Metrics (Actuator, Prometheus, Grafana) | Performance | ✅ Complete |
 | 16 | Centralized logging (Grafana Loki) | Performance | ⬜ |
-| 17 | Apache Kafka | Event-Driven | ⬜ |
+| 17 | Apache Kafka | Event-Driven | ✅ Complete |
 | 18 | Transactional Outbox pattern | Event-Driven | ⬜ |
 | 19 | Modular monolith (Spring Modulith) | Distributed | ⬜ |
 | 20 | Microservices split | Distributed | ⬜ |
