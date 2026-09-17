@@ -1,0 +1,14 @@
+# notification-service against its own PostgreSQL database.
+spring:
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/ecomdemo_notification}
+    username: ${POSTGRES_USER:ecomdemo}
+    password: ${POSTGRES_PASSWORD:ecomdemo}
+
+    hikari:
+      pool-name: NotificationServicePool
+      maximum-pool-size: 5
+      minimum-idle: 1
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000

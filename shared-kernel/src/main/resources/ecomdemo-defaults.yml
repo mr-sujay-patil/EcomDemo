@@ -1,0 +1,99 @@
+# What every EcomDemo service configures the same way.
+#
+# This file ships inside the shared-kernel jar and each service pulls it in with
+#   spring.config.import: "classpath:ecomdemo-defaults.yml"
+#
+# Why an import rather than a second application.yml: Spring Boot loads ONE classpath
+# application.yml. Two jars each carrying one is not a merge, it is a coin toss - the service's own
+# file wins and this one is silently ignored. spring.config.import is the supported way for a library
+# to contribute configuration, and it has the precedence you want: an imported document ranks BELOW
+# the document that imported it, so any service can override anything here by simply saying it again.
+#
+# What is deliberately NOT here: ports, database URLs, topic names, client base URLs. Anything a
+# service would want to be different from its neighbours belongs to the service, or the "one database
+# per service" rule would be undone by a config file.
+
+spring:
+  jpa:
+    open-in-view: false            # no lazy loading during JSON serialisation - map to DTOs in the service
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+        jdbc:
+          # Bind and read timestamps as UTC rather than in the JVM's default zone, so the same code
+          # behaves identically on a laptop in IST and a server in UTC.
+          #
+          # It matters more now than it did. Five services stamp timestamps into five databases, and
+          # an order's placed_at is read back by a notification written in a different process. One
+          # zone, chosen once, is what keeps those comparable.
+          time_zone: UTC
+
+    hibernate:
+      # Flyway owns the schema from Phase 5 on, and after Phase 20 each service owns its own Flyway
+      # timeline against its own database. `validate` makes Hibernate compare the @Entity mappings
+      # against the tables Flyway built and refuse to start if they disagree.
+      ddl-auto: validate
+
+# Actuator: what the outside world may ask this service about itself.
+#
+# Deny-by-default, in the same spirit as the security rules. Actuator ships around two dozen
+# endpoints; exposure is an explicit allow-list.
+management:
+  endpoints:
+    web:
+      exposure:
+        # /actuator/env and /actuator/beans in particular are reconnaissance aids - env prints
+        # resolved configuration, which is where connection strings live. With five services there
+        # are now five of them to leave closed.
+        include: health,info,metrics,prometheus
+
+  endpoint:
+    health:
+      # Anonymous callers get {"status":"UP"} and nothing more. An administrator gets the component
+      # breakdown, which names the dependencies and reports their state.
+      show-details: when-authorized
+      roles: ADMIN
+
+      group:
+        # Liveness answers one question: "is this process broken beyond recovery?" The only cure for
+        # a NO is a restart, so the group deliberately contains NOTHING but the service's own state.
+        #
+        # Wiring a dependency in here is a classic and expensive mistake, and the split multiplies
+        # it: if order-service reported itself dead whenever catalog-service was slow, one service's
+        # bad afternoon would restart the fleet.
+        liveness:
+          include: livenessState
+
+        # Readiness answers a different question: "should traffic be sent here right now?" A NO
+        # removes the instance from the load balancer and leaves it running, so depending on
+        # infrastructure is exactly right. Each service adds its own dependencies to this group -
+        # catalog-service includes redis, the rest do not.
+        readiness:
+          include: readinessState,db
+
+  health:
+    # Off by default outside Kubernetes, and without it neither livenessState nor readinessState
+    # exists as an indicator - the two groups above would then fail startup.
+    probes:
+      enabled: true
+
+  metrics:
+    distribution:
+      # Ship a histogram, not a pre-computed average.
+      #
+      # An average latency hides everything worth knowing. A histogram is a set of bucket counters,
+      # which Prometheus can add up across instances, so p95 for the whole service is computable
+      # from the parts. Percentiles calculated per-instance cannot be averaged together and are
+      # wrong the moment there is more than one replica - which, with five services, is now the
+      # normal case rather than a future one.
+      percentiles-histogram:
+        http.server.requests: true
+
+server:
+  error:
+    include-stacktrace: never
+
+logging:
+  level:
+    org.hibernate.orm.jdbc.bind: trace   # shows the values bound to '?' placeholders in the SQL above

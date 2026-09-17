@@ -7,6 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **EcomDemo** is a learning project: an e-commerce backend that grows from a single Spring Boot
 monolith into a production-grade distributed system, adding **exactly one** technology per phase.
 
+**Since Phase 20 this is a Maven multi-module repository containing five deployable services.** Read
+the Services section below before anything else — most of the guidance in this file still applies,
+but it now applies *per service*.
+
 The purpose is understanding, not shipping a product. That constraint drives everything below — code
 is written to be read and explained, and a phase never "sneaks in" a technology that belongs to a
 later one.
@@ -24,19 +28,65 @@ later one.
 | Language | Java 21 (the build targets `release 21` regardless of the local JDK) |
 | Framework | Spring Boot 4.1.1 |
 | Build | Maven, via the committed wrapper — always `./mvnw`, never a system `mvn` |
-| Database | PostgreSQL 16+ when the app runs (`dev` profile); H2 in-memory when the tests run (`test` profile) |
+| Database | PostgreSQL when a service runs (`dev` profile); H2 in-memory when the tests run (`test` profile). **One database per service** |
 | Schema | Owned by Flyway (`src/main/resources/db/migration`). Hibernate only validates |
-| Running it | `docker compose up -d --build` (app + PostgreSQL), or `./mvnw spring-boot:run` against a local database |
+| Running it | `docker compose up -d --build` (five services + PostgreSQL, Redis, Kafka) |
 | Security | Spring Security, JWT bearer tokens, stateless. Roles `CUSTOMER` and `ADMIN` |
-| Cache | Redis, via Spring's cache abstraction. Product reads only |
+| Cache | Redis, via Spring's cache abstraction. **catalog-service only**, product reads only |
+| Messaging | Apache Kafka (KRaft). order-service publishes, notification-service consumes |
+
+## Services
+
+| Module | Port | Owns | Calls |
+|---|---|---|---|
+| `shared-kernel` | — | error shape, JWT validation, clock, metric tags. A library, never repackaged | — |
+| `services/customer-service` | 8081 | `users`; issues tokens; publishes the JWK set | nothing |
+| `services/catalog-service` | 8082 | `products`; the only Redis | nothing |
+| `services/inventory-service` | 8083 | `stock_levels`; reservations | nothing |
+| `services/order-service` | 8084 | `carts`, `orders`, `order_audit` | catalog + inventory (HTTP), Kafka (publish) |
+| `services/notification-service` | 8085 | `notifications`, `processed_events` | Kafka (consume) |
+
+Port 8080 is deliberately unused - it belonged to the monolith and belongs to the API gateway.
+
+**Rules that are not negotiable across the split:**
+
+1. **No service reads another's database.** Enforced by PostgreSQL, which has no cross-database
+   joins; `MigrationLayoutTest` additionally checks that no migration references a table in another
+   service's schema.
+2. **No DTO or event record goes in `shared-kernel`.** Infrastructure is shared; contracts are not.
+   Each consumer declares the shape it needs - order-service's `CatalogProduct` has three fields
+   where catalog-service's `ProductResponse` has five. A shared contract class means five services
+   that must be redeployed together, which is the monolith with extra network calls.
+3. **Event and response contracts evolve additively.** Add fields, never rename or remove. A rename
+   is two deploys: add the new name, wait for every reader, remove the old - the same
+   expand-then-contract discipline the migrations follow, for the same reason.
+4. **Every service validates JWTs itself**, from customer-service's published public key. No service
+   asks another whether a token is good; that would put one process in front of every request to the
+   other four.
+5. **`@Transactional` stops at the process boundary.** A transaction belongs to one connection to one
+   database. Anything spanning two services is a compensation - an attempt to undo, after the fact,
+   over a network that can fail - and must be written and commented as one.
+6. **Never open a transaction around a network call.** It holds a pooled connection for the duration
+   of somebody else's latency. `OrderPlacement` is not transactional for exactly this reason, and
+   `OrderWriter` exists as a separate bean so the transaction can start afterwards.
+7. **Every outbound client has a timeout.** An in-process call returns or throws; a network call can
+   also hang, and an unbounded read exhausts the thread pool.
+8. **Forward the caller's token**, do not hold a service credential. Identity survives the hop and no
+   service is more privileged than its callers.
 
 ## Build commands
 
 ```bash
-./mvnw clean verify       # full build + tests - run this before every commit
-./mvnw test               # tests only
-./mvnw spring-boot:run    # start on http://localhost:8080
+./mvnw clean verify                          # all six modules - run this before every commit
+./mvnw test                                  # tests only, no Docker needed
+./mvnw -pl services/order-service verify     # one service
+./mvnw -pl shared-kernel install             # after changing the kernel, before building a service alone
 ```
+
+There is no `spring-boot:run` for "the application" any more - there are five. Run one with
+`./mvnw -pl services/catalog-service spring-boot:run`, and note that it needs its own database
+(`ecomdemo_catalog`) and, for anything authenticated, a customer-service to fetch the JWK set from.
+`docker compose up -d --build` remains the way to run the system.
 
 Running a subset:
 
@@ -70,35 +120,37 @@ under the running JVM. Stop the process first.
 
 ## Architecture
 
-Three feature packages — `product`, `cart`, `order` — plus `common`. A request goes
-**Controller → Service → Repository** and never sideways or backwards.
+A request goes **Controller → Service → Repository** and never sideways or backwards. That is
+unchanged; what changed in Phase 20 is what lies on the other side of a "cross-feature" call.
 
-**Cross-feature calls go service → service, never into another feature's repository.** There are
-exactly two such seams, and both are deliberate:
+**Within a service**, cross-feature calls go service → service, never into another feature's
+repository. `CartService.requireCart()` still returns the `Cart` **entity** - the one documented
+exception to "entities never leave the service layer" - because `OrderWriter` needs the live managed
+entity so that clearing the cart participates in the checkout transaction. Both are in order-service,
+so both share a transaction.
 
-- `ProductService.requireEntity(id)` — the catalogue lookup that throws `NotFoundException` rather
-  than returning an `Optional`, so no caller handles the empty case.
-- `CartService.requireCart()` — returns the `Cart` **entity**, the one documented exception to
-  "entities never leave the service layer". `OrderService` needs the live managed entity so that
-  clearing the cart participates in the checkout transaction.
+**Across services**, there are no seams like that and there cannot be. `ProductService.requireEntity`
+was deleted: what made it useful was that the caller shared the transaction, and a caller in another
+process shares nothing. order-service reads prices over HTTP and gets an immutable snapshot, which is
+all a boundary can hand over.
 
-A service test therefore mocks the collaborating *service* (`ProductService`, `CartService`), never
-that service's repository.
+A service test mocks the collaborating *service* within a module, and the *client interface*
+(`CatalogClient`, `InventoryClient`) across a boundary - never the transport, except in
+`ServiceClientsTest`, which exists precisely to exercise the real proxies.
 
-**The cart is a single shared row.** There are no users until Phase 8, so `Cart.SHARED_CART_ID = 1L`
-is the id every cart endpoint operates on. `data.sql` seeds it for the test profile; in `dev`
-nothing seeds it and `requireCart()` simply recreates the row when it is missing.
+**Cart totals are derived, order totals are stored.** A cart must show today's price, so
+`CartService` fetches it from catalog-service on every read - **once for the whole cart**, never once
+per line, because that loop now crosses a network. `Order` stores `totalAmount`, and `OrderItem`
+snapshots `productName` and `unitPrice` at checkout, because an order is a historical record:
+repricing or deleting a product must not rewrite what a customer already paid. After the split that
+snapshot is not merely correct but necessary - `product_id` resolves to nothing this database can
+reach.
 
-**Cart totals are derived, order totals are stored.** `Cart.total()` recomputes from the live
-`Product` prices on every read — a cart must show today's price. `Order` stores `totalAmount`, and
-`OrderItem` snapshots `productName` and `unitPrice` at checkout, because an order is a historical
-record: repricing or deleting a product must not rewrite what a customer already paid. The order's
-`product` association is kept only for traceability and is never used to render a line.
-
-**Checkout validates the whole cart before mutating anything.** `OrderService.placeOrder()` loops
-twice — once to check stock for every line, once to reduce stock and build the order. With
-`@Transactional`, a five-line order whose fourth line is short changes nothing at all. Tests pin this
-by asserting the *first* line's stock is untouched after the failure.
+**Checkout validates everything before mutating anything**, and the reservation is what preserves it.
+`POST /api/stock/reservations` takes the whole cart in one request so inventory-service can check
+every line inside one transaction and apply none of them if any fails. One call per line would lose
+the all-or-nothing property that Phase 0 built in, purely by moving stock behind HTTP - which is the
+single easiest thing to get wrong when splitting a service.
 
 **Updates rely on Hibernate dirty checking, not `save()`.** Inside a `@Transactional` service method
 an entity loaded from a repository is managed, so mutating it is enough; `ProductService.update`,
@@ -160,8 +212,14 @@ non-root, layering, health-check ordering, no literal secrets.
 mapping added without a matching migration fails at startup — loudly, and before the first query
 rather than during it.
 
-**Migrations live in `src/main/resources/db/migration`**, named `V<n>__snake_case_description.sql`.
-The version number is the order of application, permanently.
+**Migrations live in each service's `src/main/resources/db/migration`**, named
+`V<n>__snake_case_description.sql`. The version number is the order of application, permanently.
+
+**Each service has its own timeline, starting at V1, and its own `flyway_schema_history` in its own
+database.** They were renumbered once, in Phase 20, which is the single legitimate exception to rule
+2 below: the five databases were new and empty, so nothing held a checksum of the old files.
+`MigrationLayoutTest` in shared-kernel enforces the result - contiguous from V1 per service, no table
+created by two services, and no `REFERENCES` clause naming a table in another service's database.
 
 **Three rules that are not negotiable:**
 
@@ -226,16 +284,35 @@ recording a trade-off or a non-obvious constraint.
 
 ## Security
 
-**Authentication is a bearer token.** Credentials go to `POST /api/auth/login` once; every other
-request carries `Authorization: Bearer <token>`. The token is HS256, signed with `JWT_SECRET`, and
-carries the customer id as `sub` and the role as a claim — so authorizing a request needs no database
-read. **A JWT is signed, not encrypted:** anything in the payload is readable by whoever holds it.
+**Authentication is a bearer token.** Credentials go to `POST /api/auth/login` on **customer-service**
+once; every other request, to any service, carries `Authorization: Bearer <token>`. The token is
+**RS256** since Phase 20 - customer-service holds the private key and publishes the public half at
+`/.well-known/jwks.json`, and the other four verify locally with it. HS256 would have meant every
+service that can check a token can also mint one. The token carries the customer id as `sub` and the
+role as a claim, so authorizing a request needs no database read - which stopped being an
+optimisation and became the design, since four of the five services have no users table at all.
+
+**A JWT is signed, not encrypted:** anything in the payload is readable by whoever holds it.
+
+**The token is kept on the Authentication and must not be erased.** `SecurityUserAuthentication`
+overrides `eraseCredentials()` to do nothing, because order-service forwards the caller's own token
+to its neighbours. `UsernamePasswordAuthenticationToken` nulls its credentials there, and
+`ProviderManager` calls it on every successful authentication - which silently broke propagation
+once already.
 
 **Never put a secret, or anything you would not print on a postcard, in a claim.** And remember a
 token cannot be revoked — a change of role takes effect only when the current token expires.
 
-**Every endpoint is denied by default.** `WebSecurityConfiguration` lists what is public; adding an
-endpoint cannot accidentally publish it. Rules are matched in order, so the specific ones come first.
+**Every endpoint is denied by default, in every service.** The filter chain is shared
+(`ResourceServerAutoConfiguration` in shared-kernel); each service contributes a
+`ServiceAuthorizationRules` bean naming only what it makes public. Service rules are applied first,
+then the actuator rules, then `anyRequest().authenticated()` - so a service can only ever open
+something up, never leave a gap. Rules are matched in order, so the specific ones come first.
+
+Note the consequence of five chains: deny-by-default now has to hold five times, and a rule forgotten
+in one service is a hole in the system even if the other four are right. **A `@WebMvcTest` must
+import both `SecurityTestConfiguration` and its own rules class** - with only the former the chain
+loads, nothing is public, and every anonymous test gets a 401 that looks like a broken rule.
 
 **Controllers take the principal, services take an id.** `@AuthenticationPrincipal SecurityUser` in
 the controller, a `Long customerId` parameter into the service. Never read `SecurityContextHolder`
@@ -271,10 +348,14 @@ even if the hash is the password.
 
 ## Caching
 
-**Cache what is read to be displayed, never what is read to make a decision.** `findById` and
-`findAll` are cached; **`ProductService.requireEntity` is not, and must not be** — it carries
-`stockQuantity` and feeds the checkout stock check, so a cached value would let two shoppers oversell
-the last unit.
+**Caching lives in catalog-service and nowhere else.** That is the Phase 20 form of the Phase 13
+rule: cache what is read to be displayed, never what is read to make a decision. Everything
+catalog-service serves is display data, so all of it is cacheable without reservation; stock feeds a
+decision and lives in inventory-service, which has no Redis dependency at all. The rule can no longer
+be broken by annotating the wrong method.
+
+(Phase 13 had to carve out `ProductService.requireEntity` as the one lookup that must not be cached,
+because it carried `stockQuantity`. That method is gone - see Architecture.)
 
 **Every cache declares its value type** in `CacheConfiguration`. Adding a cache means adding a
 `RedisCacheConfiguration` for it with a `JacksonJsonRedisSerializer` for what it holds; the generic
@@ -299,7 +380,13 @@ tests get a real Redis container from `AbstractPostgresIT`.
 **The service layer owns the transaction boundary.** Class-level `@Transactional(readOnly = true)`,
 overridden with `@Transactional` on the methods that write. A class-level annotation applies to
 *every* method, so a method that must not be transactional has to opt out explicitly
-(`Propagation.NEVER` on `OrderService.placeOrder`).
+(`Propagation.NEVER` on `OrderService.placeOrder` and `StockService.reserve`).
+
+**A transaction covers one database and stops at the process boundary.** `OrderPlacement` carries no
+class-level annotation at all - it makes two HTTP calls, and a transaction held across them keeps a
+pooled connection for the duration of somebody else's latency. Anything that must span two services
+is a *compensation*, not a rollback: an HTTP call that can itself fail, leaving the system
+inconsistent. Write it as one and comment it as one.
 
 **Self-invocation does not work, and fails silently.** `@Transactional`, `@Retryable` and friends are
 applied by a proxy. Calling `this.otherMethod()` bypasses it entirely: the annotation is ignored, the
@@ -360,10 +447,30 @@ real PostgreSQL container and a test named `FooTest` runs at `test` with no Dock
 all. Never name an integration test `*Test`: it would then run under Surefire, which aborts the build
 on first failure and would leave containers behind.
 
-**Integration tests extend `AbstractPostgresIT`.** It holds one container for the whole JVM (a static
-field, the singleton pattern), exposes a `RestTestClient` bound to the real port, and lets
-`@ServiceConnection` wire the random host port into the context. They run under the default `dev`
-profile, so the Flyway migrations and `ddl-auto: validate` are exercised on the real engine.
+**Integration tests extend that service's own `Abstract*IT`.** There were one of these and there are
+now five, each starting only the containers its service actually talks to - customer-service and
+inventory-service start one, catalog-service two, order-service and notification-service two
+including Kafka. Each holds its containers for the whole JVM (static fields, the singleton pattern),
+exposes a `RestTestClient` bound to the real port, and lets `@ServiceConnection` wire the random host
+port in. They run under the default `dev` profile, so the migrations and `ddl-auto: validate` are
+exercised on the real engine.
+
+**Tokens in tests come from `TestTokens`, not from logging in.** Four of the five services have no
+login endpoint. `TestTokens` mints RS256 tokens with a throwaway keypair and each base class wires the
+matching decoder in - which is exactly the production arrangement, and is what makes "this service
+validates tokens independently" testable at all. Only customer-service's suite logs in for real.
+
+**A neighbour is mocked at the client interface, never booted.** order-service's suite replaces
+`CatalogClient` and `InventoryClient` with `@MockitoBean`. Booting two more Spring applications per
+test class would be slow enough to discourage writing tests and would test the wrong thing - a mock
+can return a 409, refuse a connection or hang, which is what this suite is about.
+
+**Contracts across a boundary are pinned on both sides.** `OrderPlacedEventContractTest` asserts the
+JSON field names the producer emits; notification-service publishes a hand-written golden sample with
+those names. `ServiceClientsTest` builds the real HTTP proxies against `MockRestServiceServer` -
+without it, nothing ever asks Spring to implement a client interface, and a missing `@PathVariable`
+reaches production. **Treat "all six modules are green" as necessary and not sufficient**; the
+end-to-end claim is verified through Compose.
 
 **An IT may not assume an empty table.** Every IT shares one container and commits as it goes.
 Create the rows a test needs, assert on those, and never on counts. If a test needs the shared cart
@@ -479,3 +586,7 @@ the PR.
    variable, and `.env` is ignored.
 5. Every phase updates `README.md`, `docs/decisions.md` and the Progress Tracker in
    `docs/ROADMAP.md`.
+6. **A phase is not done until it has been run.** Three of the six bugs in Phase 20 passed the entire
+   test suite and failed on the first real request through `docker compose up` - a missing
+   `@PathVariable`, a silently erased bearer token, and a serializer default that blocked a whole
+   partition. Green modules are evidence about the modules.

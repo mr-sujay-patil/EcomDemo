@@ -1,0 +1,37 @@
+# catalog-service: what the shop sells.
+spring:
+  application:
+    name: catalog-service
+
+  profiles:
+    active: dev
+
+  config:
+    import: "classpath:ecomdemo-defaults.yml"
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Where this service fetches the public key it verifies tokens with.
+          #
+          # Fetched once, lazily, on the first token it has to check, and then cached - so this is
+          # not a per-request dependency on customer-service. Once the key is held, this service can
+          # authorize requests for as long as it is up, whatever has happened to customer-service.
+          #
+          # There is no secret in this URL and nothing to protect: it returns a public key, which is
+          # the entire reason RS256 replaced Phase 9's shared HMAC secret when the monolith split.
+          jwk-set-uri: ${JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+
+server:
+  port: 8082
+
+management:
+  endpoint:
+    health:
+      group:
+        # This service is not ready without its cache. Overriding the shared default rather than
+        # editing it: only catalog-service has a Redis, and a readiness group naming a component the
+        # other four do not have would fail their startup.
+        readiness:
+          include: readinessState,db,redis

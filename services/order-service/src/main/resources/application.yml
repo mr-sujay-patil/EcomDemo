@@ -1,0 +1,104 @@
+# order-service: carts, checkout and orders.
+#
+# The only service that calls other services, which is why this is the longest of the five
+# configuration files: two client base URLs, a Kafka producer, and the JWKS endpoint.
+spring:
+  application:
+    name: order-service
+
+  profiles:
+    active: dev
+
+  config:
+    import: "classpath:ecomdemo-defaults.yml"
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+
+  # Apache Kafka. Every setting here is shared by dev and test; the test profile only switches the
+  # listeners off so `./mvnw test` still needs no broker.
+  kafka:
+    # Overridden by SPRING_KAFKA_BOOTSTRAP_SERVERS in compose. The local default matches a broker
+    # published on the host, which is what a `docker run` of apache/kafka would give you.
+    #
+    # "Bootstrap" is literal: this address is used once, to ask the cluster for its full topology.
+    # Everything after that goes straight to whichever broker leads the partition being read or
+    # written, at the address that broker advertises. Listing every broker here is therefore not
+    # required - it only buys resilience for that first call.
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # JacksonJsonSerializer, not JsonSerializer.
+      #
+      # Spring Kafka 4.1 ships both, and the difference is which Jackson they use: JsonSerializer is
+      # the Jackson 2 one (com.fasterxml.jackson), Jackson* is the Jackson 3 one (tools.jackson) that
+      # Spring Boot 4 standardised on. It matters immediately - Jackson 2 refuses to serialize
+      # java.time.Instant without the JSR-310 module registered, and OrderPlacedEvent.placedAt is an
+      # Instant, so the older pair fails at the first checkout with "Java 8 date/time type not
+      # supported by default". Jackson 3 handles it out of the box.
+      #
+      # Same trap as tools.jackson vs com.fasterxml.jackson in the test sources: every example
+      # written before Boot 4 names the class that no longer works here.
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+
+      # Wait for the leader AND every in-sync replica to have written the record before calling the
+      # send successful.
+      #
+      # acks=1 (leader only) is the setting that quietly loses data: the leader acknowledges, then
+      # fails before any follower has copied the record, and a follower that never saw it is
+      # elected. acks=all is the difference between at-least-once and "at-least-once unless
+      # something goes wrong", and the cost is a few milliseconds.
+      acks: all
+
+      # Keep trying. A retriable failure is usually a leader election in progress, which resolves in
+      # seconds; failing the send instead would push a transient problem all the way up to checkout.
+      retries: 10
+
+      properties:
+        # Retries alone can duplicate: the broker may have written the record and lost the network
+        # before acknowledging, so the client retries something already stored. The idempotent
+        # producer gives each producer a session id and each record a sequence number, and the
+        # broker discards a duplicate it has already seen.
+        #
+        # This is exactly-once semantics *for the write*, and it is worth being clear about how far
+        # that reaches: it removes duplicates caused by producer retries, and nothing else. An
+        # application that publishes the same order twice still publishes it twice, which is why
+        # the consumer is idempotent as well.
+        enable.idempotence: true
+
+        # How long send() may block waiting for cluster metadata before giving up. The default is
+        # 60 seconds, and it is a blocking wait on the calling thread - with a broker down, every
+        # checkout would hang for a minute before the event failed. 5 seconds is long enough to ride
+        # out a leader election and short enough that a real outage degrades rather than freezes.
+        max.block.ms: 5000
+
+
+server:
+  port: 8084
+
+ecomdemo:
+  clients:
+    # Where the neighbours live. Service names on the compose network; localhost ports when running
+    # services by hand. Nothing in com.ecomdemo.order.client knows either - see
+    # ServiceClientsConfiguration.
+    #
+    # This is the whole of "service discovery" in Phase 20, and it is enough because compose's DNS
+    # resolves a service name to its container. It stops being enough the moment there is more than
+    # one instance of catalog-service and something has to choose between them.
+    catalog:
+      base-url: ${CATALOG_BASE_URL:http://localhost:8082}
+    inventory:
+      base-url: ${INVENTORY_BASE_URL:http://localhost:8083}
+
+management:
+  metrics:
+    distribution:
+      percentiles-histogram:
+        # The checkout timer from Phase 15. It measures more than it used to: the same meter now
+        # covers two HTTP calls to other services as well as the local database work, so its p95 is
+        # the first place a slow neighbour shows up.
+        order.checkout: true
